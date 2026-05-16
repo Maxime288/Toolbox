@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️ SECURITY TOOLBOX FRAMEWORK v3.5 (Enterprise Monolithic Core)
-Standards DevSecOps : POO, Concurrence, Fallback API, SSH Hardening, SSL/TLS Auditor & Risk Engine.
+⚙️ SECURITY TOOLBOX FRAMEWORK v3.6 (Enterprise Monolithic Core)
+Standards DevSecOps : POO, Concurrence, Fallback API, SSH Hardening, SSL/TLS Auditor & John-like Hash Cracker Simulator.
 """
 
 import os
@@ -25,6 +25,7 @@ try:
     from rich.panel import Panel
     from rich.prompt import Prompt
     from rich.logging import RichHandler
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 except ImportError:
     print("[!] Erreur : La bibliothèque 'rich' est requise. Installez-la via 'pip install rich'")
     sys.exit(1)
@@ -40,7 +41,7 @@ except ImportError:
 # =====================================================================
 FRAMEWORK_CONFIG = {
     "framework": {
-        "version": "3.5.0-ENTERPRISE (All-In-One)",
+        "version": "3.6.0-ENTERPRISE (All-In-One)",
         "reports_dir": "reports",
         "log_file": "framework.log"
     },
@@ -51,7 +52,7 @@ FRAMEWORK_CONFIG = {
             "target_ports": [21, 22, 80, 443, 8080]
         },
         "password_audit": {
-            "common_words": ["123456", "password", "admin", "secret", "password123", "qwerty"]
+            "common_words": ["123456", "password", "admin", "secret", "password123", "qwerty", "kali", "password1234"]
         },
         "osint_ip": {
             "timeout": 3,
@@ -221,20 +222,16 @@ class SslAuditorPlugin(BasePlugin):
             "expiration_date": "N/A"
         }
 
-        # 1. Extraction et analyse du Certificat
         self.logger.info(f"Analyse du certificat SSL de {target}...")
         try:
             ctx = ssl.create_default_context()
             with socket.create_connection((target, 443), timeout=timeout) as sock:
                 with ctx.wrap_socket(sock, server_hostname=target) as ssock:
                     cert = ssock.getpeercert()
-                    
-                    # Parsing de l'émetteur et validité
                     issuer = dict(x[0] for x in cert['issuer'])
                     report["issuer"] = issuer.get('commonName', 'Inconnu')
                     report["expiration_date"] = cert.get('notAfter', 'N/A')
                     
-                    # Vérification de l'expiration
                     exp_date = datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
                     if exp_date < datetime.utcnow():
                         report["certificate_expired"] = True
@@ -243,9 +240,8 @@ class SslAuditorPlugin(BasePlugin):
             self.logger.error(f"Impossible de récupérer le certificat : {e}")
             return {"target": target, "error": f"Connexion échouée : {str(e)}"}
 
-        # 2. Audit des protocoles obsolètes (SSLv3, TLS 1.0, TLS 1.1)
         deprecated_protocols = {
-            "SSLv3": ssl.PROTOCOL_TLSv1,  # Simulation de fallback historique
+            "SSLv3": ssl.PROTOCOL_TLSv1,
             "TLSv1.0": ssl.PROTOCOL_TLSv1,
             "TLSv1.1": ssl.PROTOCOL_TLSv1_1 if hasattr(ssl, 'PROTOCOL_TLSv1_1') else None
         }
@@ -254,14 +250,12 @@ class SslAuditorPlugin(BasePlugin):
         for proto_name, proto_id in deprecated_protocols.items():
             if proto_id is None: continue
             try:
-                # Création d'un contexte de sécurité restrictif à cette ancienne version
                 bad_ctx = ssl.SSLContext(proto_id)
                 with socket.create_connection((target, 443), timeout=timeout) as sock:
                     with bad_ctx.wrap_socket(sock, server_hostname=target):
                         report["obsolete_protocols_allowed"].append(proto_name)
                         self.logger.warning(f"[!] Vulnérabilité : La cible accepte le protocole déprécié {proto_name}")
             except Exception:
-                # Si le handshake échoue, c'est une bonne nouvelle (le serveur rejette le vieux protocole)
                 pass
 
         return report
@@ -286,7 +280,6 @@ class SshHardeningPlugin(BasePlugin):
         }
 
         self.logger.info(f"Connexion au service SSH sur {target}:22...")
-        # 1. Analyse externe (Bannière)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(timeout)
@@ -294,8 +287,6 @@ class SshHardeningPlugin(BasePlugin):
                     banner = s.recv(1024).decode(errors='ignore').strip()
                     report["ssh_banner"] = banner
                     self.logger.info(f"Bannière SSH capturée : {banner}")
-                    
-                    # Détection de vieilles versions de protocoles (ex: SSH-1.x)
                     if "SSH-1." in banner:
                         report["vulnerabilities"].append("Protocole obsolète SSHv1 activé")
                 else:
@@ -303,31 +294,112 @@ class SshHardeningPlugin(BasePlugin):
         except Exception as e:
             self.logger.error(f"Erreur d'accès réseau au port 22 : {e}")
 
-        # 2. Analyse de conformité locale (Simulée pour audit de fichier d'infrastructure de production)
-        # Si la cible est locale, on inspecte le fichier de configuration standard de durcissement
         local_config_path = "/etc/ssh/sshd_config"
         if target in ["127.0.0.1", "localhost"] and os.path.exists(local_config_path):
             self.logger.info(f"Analyse de conformité locale détectée sur {local_config_path}")
             try:
                 with open(local_config_path, "r") as f:
                     content = f.read()
-                    
-                    # Audit PermitRootLogin
                     if "PermitRootLogin yes" in content or "#PermitRootLogin yes" in content:
                         report["root_login_allowed"] = True
                         report["vulnerabilities"].append("PermitRootLogin activé : Risque élevé de brute-force")
                     else:
                         report["root_login_allowed"] = False
 
-                    # Audit PasswordAuthentication
                     if "PasswordAuthentication yes" in content or "#PasswordAuthentication yes" in content:
                         report["password_auth_allowed"] = True
                         report["vulnerabilities"].append("PasswordAuthentication activé : Préférer l'usage de clés SSH")
                     else:
                         report["password_auth_allowed"] = False
             except Exception as e:
-                self.logger.debug(f"Lecture sshd_config impossible (Droits insuffisants) : {e}")
+                self.logger.debug(f"Lecture sshd_config impossible : {e}")
                 
+        return report
+
+
+class LocalJohnCrackerPlugin(BasePlugin):
+    """
+    Recyclage et adaptation sécurisée de la logique de brute_forcer.py :
+    Simulateur de cassage de hashs locaux (John the Ripper) avec parallélisation et barre de progression Rich.
+    """
+    @property
+    def name(self) -> str: return "Local Hash Cracker Simulator (John-like)"
+    @property
+    def description(self) -> str: return "Audit de robustesse de hashs via attaque par dictionnaire multithreadée"
+
+    def _crack_worker(self, target_hash, password, algo, found_event):
+        if found_event.is_set():
+            return None
+        
+        # Dérivation locale selon le type choisi
+        if algo == "MD5":
+            current_hash = hashlib.md5(password.encode()).hexdigest()
+        elif algo == "SHA-256":
+            current_hash = hashlib.sha256(password.encode()).hexdigest()
+        else:
+            current_hash = hashlib.sha1(password.encode()).hexdigest()
+
+        if current_hash == target_hash:
+            found_event.set()
+            return password
+        return None
+
+    def execute(self, config: dict) -> dict:
+        wordlist = config["modules"]["password_audit"]["common_words"]
+        
+        console.print("\n[bold orange1]⚙️ SIMULATEUR DE CASSAGE CRYPTOGRAPHIQUE (LOCAL JOHN)[/bold orange1]")
+        algo = Prompt.ask("Sélectionnez l'algorithme cible", choices=["MD5", "SHA-1", "SHA-256"], default="SHA-256")
+        user_secret = Prompt.ask("Entrez un mot de passe témoin à hacher puis cracker", default="kali")
+        
+        # Génération du hash cible à casser
+        if algo == "MD5":
+            target_hash = hashlib.md5(user_secret.encode()).hexdigest()
+        elif algo == "SHA-256":
+            target_hash = hashlib.sha256(user_secret.encode()).hexdigest()
+        else:
+            target_hash = hashlib.sha1(user_secret.encode()).hexdigest()
+
+        console.print(f" [bold]*[/bold] Hash généré à inverser : [bold yellow]{target_hash}[/bold yellow]")
+        console.print(f" [bold]*[/bold] Taille du dictionnaire embarqué : [bold cyan]{len(wordlist)} entrées[/bold cyan]\n")
+
+        found_event = concurrent.futures.ThreadPoolExecutor()._shutdown_lock # Simulation d'interrupteur
+        found_event = concurrent.futures.futures.threading.Event()
+        valid_password = None
+        start_time = time.time()
+
+        # Intégration de la barre de progression Rich (équivalent à ton objet Progress de brute_forcer.py)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(bar_width=30, complete_style="orange1"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        ) as progress:
+            task = progress.add_task("[gray]Attacking dictionary...[/gray]", total=len(wordlist))
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                futures = {executor.submit(self._crack_worker, target_hash, pwd, algo, found_event): pwd for pwd in wordlist}
+                
+                for f in concurrent.futures.as_completed(futures):
+                    res = f.result()
+                    progress.advance(task)
+                    if res:
+                        valid_password = res
+                        break
+
+        elapsed = time.time() - start_time
+        report = {
+            "target_hash": target_hash,
+            "algorithm": algo,
+            "execution_time_sec": round(elapsed, 4),
+            "crack_success": valid_password is not None,
+            "recovered_secret": valid_password if valid_password else "NON_TROUVE"
+        }
+
+        if valid_password:
+            self.logger.info(f"[bold green][SUCCESS][/bold green] Hash inversé avec succès ! Correspondance : [bold light_green]{valid_password}[/bold light_green]")
+        else:
+            self.logger.warning("[bold red][FAILED][/bold red] Le dictionnaire est trop faible pour inverser ce hash.")
+            
         return report
 
 
@@ -348,13 +420,13 @@ class ContextualRiskEngine:
             base_score += len(open_ports) * 1.0
             indicators.append(f"{len(open_ports)} port(s) actif(s) sur la cible réseau")
 
-        # 2. Risque Authentification
+        # 2. Risque Authentification Globale
         audit_data = session_vault.get("Password Audit Simulator", {}).get("payload", {})
         if audit_data.get("audit_success") is True:
             base_score += 4.0
             indicators.append("Identifiant critique présent dans les bases de fuites de données")
 
-        # 3. Risque SSL/TLS Configuration Auditor (Nouveau)
+        # 3. Risque SSL/TLS Configuration Auditor
         ssl_data = session_vault.get("SSL/TLS Configuration Auditor", {}).get("payload", {})
         if ssl_data:
             if ssl_data.get("certificate_expired") is True:
@@ -365,7 +437,7 @@ class ContextualRiskEngine:
                 base_score += len(obsolete_proto) * 1.5
                 indicators.append(f"Protocoles de chiffrement obsolètes acceptés : {', '.join(obsolete_proto)}")
 
-        # 4. Risque SSH Hardening Checker (Nouveau)
+        # 4. Risque SSH Hardening Checker
         ssh_data = session_vault.get("SSH Hardening Checker", {}).get("payload", {})
         if ssh_data:
             vulnerabilities = ssh_data.get("vulnerabilities", [])
@@ -373,6 +445,12 @@ class ContextualRiskEngine:
                 base_score += len(vulnerabilities) * 1.5
                 for vuln in vulnerabilities:
                     indicators.append(f"Défaut de durcissement SSH : {vuln}")
+
+        # 5. Risque Local John Cracker (Nouveau)
+        john_data = session_vault.get("Local Hash Cracker Simulator (John-like)", {}).get("payload", {})
+        if john_data.get("crack_success") is True:
+            base_score += 3.0
+            indicators.append(f"Empreinte locale déduite par dictionnaire simple ({john_data.get('algorithm')})")
 
         # Normalisation mathématique globale (Plafonné à 10.0)
         final_score = round(min(base_score, 10.0), 1)
@@ -401,7 +479,8 @@ class FrameworkCore:
             PasswordAuditPlugin(),
             OsintIpPlugin(),
             SslAuditorPlugin(),
-            SshHardeningPlugin()
+            SshHardeningPlugin(),
+            LocalJohnCrackerPlugin()
         ]
         
         self.session_vault = {}
@@ -415,7 +494,7 @@ class FrameworkCore:
    ██║   ██║   ██║██║   ██║██║     ██╔══██╗██║   ██║  ██╔██╗     ██║   ██║██╔══██╗██║   ██║
    ██║   ╚██████╔╝╚██████╔╝███████╗██████╔╝╚██████╔╝ ██╔╝ ██╗    ╚██████╔╝██║  ██║╚██████╔╝
    ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚═════╝  ╚═════╝  ╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝ ╚═════╝[/bold blue]
-   [bold magenta]🛡️  Enterprise Security Core Framework v3.5 | SecOps & Hardening Portfolio[/bold magenta]
+   [bold magenta]🛡️  Enterprise Security Core Framework v3.6 | SecOps & Hardening Portfolio[/bold magenta]
         """
         console.print(banner)
 
