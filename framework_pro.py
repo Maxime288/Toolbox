@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️ SECURITY TOOLBOX FRAMEWORK v3.0 (Monolithic Core Edition)
-Standard de l'industrie : POO, Concurrence, Fallback API, Contextual Risk Engine & Logs.
+⚙️ SECURITY TOOLBOX FRAMEWORK v3.0 (Enterprise Monolithic Core)
+Standard de l'industrie : POO, Concurrence, Fallback API, Contextual Risk Engine & Logs épurés.
 """
 
 import os
@@ -36,7 +36,7 @@ except ImportError:
     sys.exit(1)
 
 # =====================================================================
-# 1. EMULATION DU CONFIGURATION ENGINE (Yaml-Like embedded dict)
+# 1. ARCHITECTURE DE CONFIGURATION EMBARQUÉE
 # =====================================================================
 FRAMEWORK_CONFIG = {
     "framework": {
@@ -64,11 +64,11 @@ FRAMEWORK_CONFIG = {
 }
 
 # =====================================================================
-# 2. CONFIGURATION DU LOGGING SYSTÈME STRUCTURÉ
+# 2. CONFIGURATION DU LOGGING (CORRIGÉE : SANS DOUBLON RICH)
 # =====================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(message)s",  # RichHandler gère nativement l'horodatage et les niveaux de manière propre
     datefmt="[%X]",
     handlers=[
         RichHandler(rich_tracebacks=True, markup=True),
@@ -80,7 +80,7 @@ console = Console()
 
 
 # =====================================================================
-# 3. INTERFACE ABSTRAITE (BASE PLUGIN PATTERN)
+# 3. INTERFACE ABSTRAITE DES MODULES (BASE PLUGIN PATTERN)
 # =====================================================================
 class BasePlugin(ABC):
     def __init__(self):
@@ -113,9 +113,9 @@ class NetworkScannerPlugin(BasePlugin):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(timeout)
                 if s.connect_ex((target, port)) == 0:
-                    self.logger.info(f"[🔬] Port {port} ouvert détecté sur {target}")
+                    self.logger.info(f"Port [bold cyan]{port}[/bold cyan] ouvert détecté sur {target}")
                     banner = ""
-                    # Protocol-Aware Fingerprinting sans blocage de socket
+                    # Protocol-Aware Fingerprinting non-bloquant
                     if port == 80:
                         s.sendall(b"HEAD / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n")
                         banner = s.recv(512).decode(errors='ignore').split('\r\n')[0]
@@ -128,7 +128,7 @@ class NetworkScannerPlugin(BasePlugin):
                         banner = s.recv(512).decode(errors='ignore').strip()
                     return {"port": port, "status": "OPEN", "banner": banner}
         except (socket.timeout, socket.error) as e:
-            self.logger.debug(f"Erreur socket port {port}: {e}")
+            self.logger.debug(f"Erreur d'analyse port {port}: {e}")
         return {}
 
     def execute(self, config: dict) -> dict:
@@ -178,7 +178,7 @@ class OsintIpPlugin(BasePlugin):
         mod_cfg = config["modules"]["osint_ip"]
         ip = Prompt.ask("[bold cyan]Entrez l'IP publique à analyser[/bold cyan]", default="")
         
-        # Abstraction layer & Multi-API Routing Loop
+        # Abstraction Layer & Loop de routage multi-APIs
         for endpoint in mod_cfg["endpoints"]:
             url = endpoint.format(ip=ip)
             try:
@@ -194,7 +194,7 @@ class OsintIpPlugin(BasePlugin):
                             "resolved_via": url.split('/')[2]
                         }
             except requests.RequestException as e:
-                self.logger.warning(f"Échec de bascule sur le nœud {url} : {type(e).__name__}")
+                self.logger.warning(f"Échec du nœud {url}, bascule automatique : {type(e).__name__}")
                 
         return {"error": "Tous les nœuds OSINT configurés sont hors-ligne"}
 
@@ -205,24 +205,24 @@ class OsintIpPlugin(BasePlugin):
 class ContextualRiskEngine:
     @staticmethod
     def evaluate(session_vault: dict) -> dict:
-        """ Algorithme de calcul de risque basé sur le croisement des findings """
+        """ Algorithme de calcul de score basé sur le croisement des métadonnées """
         base_score = 1.0
         indicators = []
 
-        # Facteur de corrélation 1 : Ports ouverts détectés
+        # Corrélation 1 : Analyse de la surface réseau
         net_data = session_vault.get("Scanner Réseau & Services", {}).get("payload", {})
         open_ports = net_data.get("open_ports", [])
         if open_ports:
             base_score += len(open_ports) * 1.2
             indicators.append(f"{len(open_ports)} port(s) actif(s) sur la cible réseau")
 
-        # Facteur de corrélation 2 : Mot de passe compromis détecté
+        # Corrélation 2 : Analyse de la robustesse d'authentification
         audit_data = session_vault.get("Password Audit Simulator", {}).get("payload", {})
         if audit_data.get("audit_success") is True:
             base_score += 4.5
             indicators.append("Identifiant critique présent dans les bases de fuites de données")
 
-        # Normalisation mathématique (Score plafonné à 10.0)
+        # Normalisation (Plafonné à 10.0)
         final_score = round(min(base_score, 10.0), 1)
         
         if final_score < 4.0: severity = "FAIBLE"
@@ -237,20 +237,19 @@ class ContextualRiskEngine:
 
 
 # =====================================================================
-# 6. ORCHESTRATEUR CENTRAL (CORE ENGINE & SOC DASHBOARD)
+# 6. ORCHESTRATEUR CENTRAL & SOC DASHBOARD INTERACTIVE
 # =====================================================================
 class FrameworkCore:
     def __init__(self):
         self.config = FRAMEWORK_CONFIG
         
-        # Simulation d'Auto-Discovery (Registre interne par inspection de classe)
+        # Registre interne des capacités actives (Auto-Discovery Engine)
         self.plugins = [
             NetworkScannerPlugin(),
             PasswordAuditPlugin(),
             OsintIpPlugin()
         ]
         
-        # Base de données temporaire de session (State Vault)
         self.session_vault = {}
         os.makedirs(self.config["framework"]["reports_dir"], exist_ok=True)
 
@@ -267,7 +266,6 @@ class FrameworkCore:
         console.print(banner)
 
     def display_soc_dashboard(self):
-        """ Rendu UI d'un tableau de bord d'analyste SOC """
         table = Table(title="📊 TELEMETRIE CORE SYSTEM", title_style="bold cyan")
         table.add_column("Composant Système", style="yellow")
         table.add_column("Statut Runtime", style="green")
@@ -280,12 +278,10 @@ class FrameworkCore:
         console.print(Panel(table, border_style="blue"))
 
     def finalize_report(self):
-        """ Compile les résultats, calcule les risques et exporte en JSON """
         if not self.session_vault:
-            logger.warning("Session vide. Aucun artefact n'a été généré pour le rapport.")
+            logger.warning("Session vide. Aucun artefact récolté pour générer un rapport global.")
             return
 
-        # Calcul du score croisé via le Risk Engine
         risk_profile = ContextualRiskEngine.evaluate(self.session_vault)
         
         report_data = {
@@ -301,7 +297,6 @@ class FrameworkCore:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(report_data, f, indent=4, ensure_ascii=False)
 
-        # Rendu visuel du rapport de risque
         console.print("\n")
         console.print(Panel(
             f"[bold]Score de Risque Global :[/bold] [bold red]{risk_profile['risk_score_cvss']}/10[/bold red]\n"
@@ -314,11 +309,13 @@ class FrameworkCore:
     def run(self):
         logger.info("Initialisation du noyau central réussie.")
         while True:
-            console.clear()
+            # Nettoyage absolu du terminal pour empêcher les résidus de texte en arrière-plan
+            os.system('cls' if os.name == 'nt' else 'clear')
+            
             self.display_banner()
             self.display_soc_dashboard()
 
-            # Menu de routage dynamique
+            # Rendu dynamique de la table de routage du menu
             menu = Table(show_header=True, header_style="bold purple")
             menu.add_column("ID", width=4)
             menu.add_column("Module Core")
@@ -326,8 +323,8 @@ class FrameworkCore:
             
             for i, p in enumerate(self.plugins, 1):
                 menu.add_row(str(i), p.name, p.description)
-            menu.add_row("R", "[bold gold1]Générer Rapport & Risque Contextuel[/bold gold1]", "Corrèle les modules de la session")
-            menu.add_row("Q", "Shutdown Core", "Fermeture propre du système")
+            menu.add_row("R", "[bold gold1]Générer Rapport & Risque Contextuel[/bold gold1]", "Corrèle les modules de la session en cours")
+            menu.add_row("Q", "Shutdown Core", "Fermeture propre et libération de l'environnement")
             
             console.print(menu)
             choix = console.input("\n[bold yellow]Sélectionnez une instruction : [/bold yellow]").strip().upper()
@@ -342,28 +339,31 @@ class FrameworkCore:
                     idx = int(choix) - 1
                     if 0 <= idx < len(self.plugins):
                         plugin = self.plugins[idx]
-                        logger.info(f"Appel d'exécution du module : {plugin.name}")
+                        logger.info(f"Appel du point d'entrée : {plugin.name}")
                         
-                        # Exécution isolée du plugin et archivage
+                        # Traitement et archivage dans le State Vault
                         raw_result = plugin.execute(self.config)
                         self.session_vault[plugin.name] = {
                             "captured_at": datetime.now().isoformat(),
                             "payload": raw_result
                         }
                         console.print("\n[bold green][✓] Télémétrie enregistrée dans la session.[/bold green]")
-                except (ValueError, IndexError):
-                    logger.error("Entrée utilisateur corrompue ou ID hors limites.")
+                    else:
+                        logger.warning("ID saisi en dehors des limites de la matrice.")
+                except ValueError:
+                    logger.error("Entrée utilisateur corrompue ou non convertible en entier.")
             
+            # Saut de ligne ajouté pour aérer l'interface avant le prompt de rafraîchissement
             console.input("\n[cyan]Appuyez sur [Entrée] pour rafraîchir le dashboard...[/cyan]")
 
 
 # =====================================================================
-# 7. POINT D'ENTRÉE DU RUNTIME
+# 7. RUNTIME ENTRY POINT
 # =====================================================================
 if __name__ == "__main__":
     try:
         framework = FrameworkCore()
         framework.run()
     except Exception as fatal_error:
-        print(f"[CRITICAL] Crash majeur de l'orchestrateur : {fatal_error}")
+        print(f"[CRITICAL] Rupture majeure de l'orchestrateur central : {fatal_error}")
         sys.exit(1)
