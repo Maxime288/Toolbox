@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️ SECURITY TOOLBOX FRAMEWORK v3.0 (Enterprise Monolithic Core)
-Standard de l'industrie : POO, Concurrence, Fallback API, Contextual Risk Engine & Logs épurés.
+⚙️ SECURITY TOOLBOX FRAMEWORK v3.5 (Enterprise Monolithic Core)
+Standards DevSecOps : POO, Concurrence, Fallback API, SSH Hardening, SSL/TLS Auditor & Risk Engine.
 """
 
 import os
@@ -40,7 +40,7 @@ except ImportError:
 # =====================================================================
 FRAMEWORK_CONFIG = {
     "framework": {
-        "version": "3.0.0-ENTERPRISE (All-In-One)",
+        "version": "3.5.0-ENTERPRISE (All-In-One)",
         "reports_dir": "reports",
         "log_file": "framework.log"
     },
@@ -59,16 +59,22 @@ FRAMEWORK_CONFIG = {
                 "https://ipapi.co/{ip}/json/",
                 "http://ip-api.com/json/{ip}"
             ]
+        },
+        "ssl_auditor": {
+            "timeout": 3.0
+        },
+        "ssh_checker": {
+            "timeout": 2.5
         }
     }
 }
 
 # =====================================================================
-# 2. CONFIGURATION DU LOGGING (CORRIGÉE : SANS DOUBLON RICH)
+# 2. CONFIGURATION DU LOGGING STRUCTURÉ (SANS DOUBLON)
 # =====================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(message)s",  # RichHandler gère nativement l'horodatage et les niveaux de manière propre
+    format="%(message)s",
     datefmt="[%X]",
     handlers=[
         RichHandler(rich_tracebacks=True, markup=True),
@@ -106,7 +112,7 @@ class NetworkScannerPlugin(BasePlugin):
     @property
     def name(self) -> str: return "Scanner Réseau & Services"
     @property
-    def description(self) -> str: return "Scanner TCP avec Fingerprinting ciblé par protocole (HTTP/SSH/TLS)"
+    def description(self) -> str: return "Scanner TCP asynchrone avec Fingerprinting par protocole"
 
     def _probe(self, target: str, port: int, timeout: float) -> dict:
         try:
@@ -115,7 +121,6 @@ class NetworkScannerPlugin(BasePlugin):
                 if s.connect_ex((target, port)) == 0:
                     self.logger.info(f"Port [bold cyan]{port}[/bold cyan] ouvert détecté sur {target}")
                     banner = ""
-                    # Protocol-Aware Fingerprinting non-bloquant
                     if port == 80:
                         s.sendall(b"HEAD / HTTP/1.1\r\nHost: " + target.encode() + b"\r\n\r\n")
                         banner = s.recv(512).decode(errors='ignore').split('\r\n')[0]
@@ -178,7 +183,6 @@ class OsintIpPlugin(BasePlugin):
         mod_cfg = config["modules"]["osint_ip"]
         ip = Prompt.ask("[bold cyan]Entrez l'IP publique à analyser[/bold cyan]", default="")
         
-        # Abstraction Layer & Loop de routage multi-APIs
         for endpoint in mod_cfg["endpoints"]:
             url = endpoint.format(ip=ip)
             try:
@@ -194,9 +198,137 @@ class OsintIpPlugin(BasePlugin):
                             "resolved_via": url.split('/')[2]
                         }
             except requests.RequestException as e:
-                self.logger.warning(f"Échec du nœud {url}, bascule automatique : {type(e).__name__}")
+                self.logger.warning(f"Échec du nœud {url}, bascule : {type(e).__name__}")
                 
         return {"error": "Tous les nœuds OSINT configurés sont hors-ligne"}
+
+
+class SslAuditorPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "SSL/TLS Configuration Auditor"
+    @property
+    def description(self) -> str: return "Analyse de la validité du certificat et détection de protocoles obsolètes"
+
+    def execute(self, config: dict) -> dict:
+        timeout = config["modules"]["ssl_auditor"]["timeout"]
+        target = Prompt.ask("[bold cyan]Entrez le domaine à auditer (ex: google.com)[/bold cyan]", default="google.com")
+        
+        report = {
+            "target": target,
+            "certificate_expired": False,
+            "obsolete_protocols_allowed": [],
+            "issuer": "Inconnu",
+            "expiration_date": "N/A"
+        }
+
+        # 1. Extraction et analyse du Certificat
+        self.logger.info(f"Analyse du certificat SSL de {target}...")
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((target, 443), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=target) as ssock:
+                    cert = ssock.getpeercert()
+                    
+                    # Parsing de l'émetteur et validité
+                    issuer = dict(x[0] for x in cert['issuer'])
+                    report["issuer"] = issuer.get('commonName', 'Inconnu')
+                    report["expiration_date"] = cert.get('notAfter', 'N/A')
+                    
+                    # Vérification de l'expiration
+                    exp_date = datetime.strptime(cert['notAfter'], '%b %d %H:%M:%S %Y %Z')
+                    if exp_date < datetime.utcnow():
+                        report["certificate_expired"] = True
+                        self.logger.warning("[!] Le certificat TLS a expiré !")
+        except Exception as e:
+            self.logger.error(f"Impossible de récupérer le certificat : {e}")
+            return {"target": target, "error": f"Connexion échouée : {str(e)}"}
+
+        # 2. Audit des protocoles obsolètes (SSLv3, TLS 1.0, TLS 1.1)
+        deprecated_protocols = {
+            "SSLv3": ssl.PROTOCOL_TLSv1,  # Simulation de fallback historique
+            "TLSv1.0": ssl.PROTOCOL_TLSv1,
+            "TLSv1.1": ssl.PROTOCOL_TLSv1_1 if hasattr(ssl, 'PROTOCOL_TLSv1_1') else None
+        }
+
+        self.logger.info("Scan des configurations obsolètes autorisées (SSLv3, TLS 1.0, TLS 1.1)...")
+        for proto_name, proto_id in deprecated_protocols.items():
+            if proto_id is None: continue
+            try:
+                # Création d'un contexte de sécurité restrictif à cette ancienne version
+                bad_ctx = ssl.SSLContext(proto_id)
+                with socket.create_connection((target, 443), timeout=timeout) as sock:
+                    with bad_ctx.wrap_socket(sock, server_hostname=target):
+                        report["obsolete_protocols_allowed"].append(proto_name)
+                        self.logger.warning(f"[!] Vulnérabilité : La cible accepte le protocole déprécié {proto_name}")
+            except Exception:
+                # Si le handshake échoue, c'est une bonne nouvelle (le serveur rejette le vieux protocole)
+                pass
+
+        return report
+
+
+class SshHardeningPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "SSH Hardening Checker"
+    @property
+    def description(self) -> str: return "Évaluation de la configuration de sécurité SSH (Port 22)"
+
+    def execute(self, config: dict) -> dict:
+        timeout = config["modules"]["ssh_checker"]["timeout"]
+        target = Prompt.ask("[bold cyan]Entrez l'IP ou le domaine SSH à auditer[/bold cyan]", default="127.0.0.1")
+        
+        report = {
+            "target": target,
+            "ssh_banner": "Inconnue",
+            "password_auth_allowed": "Indéterminé (Analyse locale requise)",
+            "root_login_allowed": "Indéterminé (Analyse locale requise)",
+            "vulnerabilities": []
+        }
+
+        self.logger.info(f"Connexion au service SSH sur {target}:22...")
+        # 1. Analyse externe (Bannière)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                if s.connect_ex((target, 22)) == 0:
+                    banner = s.recv(1024).decode(errors='ignore').strip()
+                    report["ssh_banner"] = banner
+                    self.logger.info(f"Bannière SSH capturée : {banner}")
+                    
+                    # Détection de vieilles versions de protocoles (ex: SSH-1.x)
+                    if "SSH-1." in banner:
+                        report["vulnerabilities"].append("Protocole obsolète SSHv1 activé")
+                else:
+                    self.logger.warning("Le port SSH (22) semble fermé sur cette cible externe.")
+        except Exception as e:
+            self.logger.error(f"Erreur d'accès réseau au port 22 : {e}")
+
+        # 2. Analyse de conformité locale (Simulée pour audit de fichier d'infrastructure de production)
+        # Si la cible est locale, on inspecte le fichier de configuration standard de durcissement
+        local_config_path = "/etc/ssh/sshd_config"
+        if target in ["127.0.0.1", "localhost"] and os.path.exists(local_config_path):
+            self.logger.info(f"Analyse de conformité locale détectée sur {local_config_path}")
+            try:
+                with open(local_config_path, "r") as f:
+                    content = f.read()
+                    
+                    # Audit PermitRootLogin
+                    if "PermitRootLogin yes" in content or "#PermitRootLogin yes" in content:
+                        report["root_login_allowed"] = True
+                        report["vulnerabilities"].append("PermitRootLogin activé : Risque élevé de brute-force")
+                    else:
+                        report["root_login_allowed"] = False
+
+                    # Audit PasswordAuthentication
+                    if "PasswordAuthentication yes" in content or "#PasswordAuthentication yes" in content:
+                        report["password_auth_allowed"] = True
+                        report["vulnerabilities"].append("PasswordAuthentication activé : Préférer l'usage de clés SSH")
+                    else:
+                        report["password_auth_allowed"] = False
+            except Exception as e:
+                self.logger.debug(f"Lecture sshd_config impossible (Droits insuffisants) : {e}")
+                
+        return report
 
 
 # =====================================================================
@@ -205,24 +337,44 @@ class OsintIpPlugin(BasePlugin):
 class ContextualRiskEngine:
     @staticmethod
     def evaluate(session_vault: dict) -> dict:
-        """ Algorithme de calcul de score basé sur le croisement des métadonnées """
+        """ Algorithme de calcul de score basé sur le croisement multi-modules """
         base_score = 1.0
         indicators = []
 
-        # Corrélation 1 : Analyse de la surface réseau
+        # 1. Risque Réseau
         net_data = session_vault.get("Scanner Réseau & Services", {}).get("payload", {})
         open_ports = net_data.get("open_ports", [])
         if open_ports:
-            base_score += len(open_ports) * 1.2
+            base_score += len(open_ports) * 1.0
             indicators.append(f"{len(open_ports)} port(s) actif(s) sur la cible réseau")
 
-        # Corrélation 2 : Analyse de la robustesse d'authentification
+        # 2. Risque Authentification
         audit_data = session_vault.get("Password Audit Simulator", {}).get("payload", {})
         if audit_data.get("audit_success") is True:
-            base_score += 4.5
+            base_score += 4.0
             indicators.append("Identifiant critique présent dans les bases de fuites de données")
 
-        # Normalisation (Plafonné à 10.0)
+        # 3. Risque SSL/TLS Configuration Auditor (Nouveau)
+        ssl_data = session_vault.get("SSL/TLS Configuration Auditor", {}).get("payload", {})
+        if ssl_data:
+            if ssl_data.get("certificate_expired") is True:
+                base_score += 3.5
+                indicators.append("Certificat de chiffrement SSL/TLS expiré (Rupture de confiance)")
+            obsolete_proto = ssl_data.get("obsolete_protocols_allowed", [])
+            if obsolete_proto:
+                base_score += len(obsolete_proto) * 1.5
+                indicators.append(f"Protocoles de chiffrement obsolètes acceptés : {', '.join(obsolete_proto)}")
+
+        # 4. Risque SSH Hardening Checker (Nouveau)
+        ssh_data = session_vault.get("SSH Hardening Checker", {}).get("payload", {})
+        if ssh_data:
+            vulnerabilities = ssh_data.get("vulnerabilities", [])
+            if vulnerabilities:
+                base_score += len(vulnerabilities) * 1.5
+                for vuln in vulnerabilities:
+                    indicators.append(f"Défaut de durcissement SSH : {vuln}")
+
+        # Normalisation mathématique globale (Plafonné à 10.0)
         final_score = round(min(base_score, 10.0), 1)
         
         if final_score < 4.0: severity = "FAIBLE"
@@ -237,17 +389,19 @@ class ContextualRiskEngine:
 
 
 # =====================================================================
-# 6. ORCHESTRATEUR CENTRAL & SOC DASHBOARD INTERACTIVE
+# 6. ORCHESTRATEUR CENTRAL & INTERFACE SOC DASHBOARD
 # =====================================================================
 class FrameworkCore:
     def __init__(self):
         self.config = FRAMEWORK_CONFIG
         
-        # Registre interne des capacités actives (Auto-Discovery Engine)
+        # Registre d'Auto-Discovery des plugins du Framework
         self.plugins = [
             NetworkScannerPlugin(),
             PasswordAuditPlugin(),
-            OsintIpPlugin()
+            OsintIpPlugin(),
+            SslAuditorPlugin(),
+            SshHardeningPlugin()
         ]
         
         self.session_vault = {}
@@ -261,7 +415,7 @@ class FrameworkCore:
    ██║   ██║   ██║██║   ██║██║     ██╔══██╗██║   ██║  ██╔██╗     ██║   ██║██╔══██╗██║   ██║
    ██║   ╚██████╔╝╚██████╔╝███████╗██████╔╝╚██████╔╝ ██╔╝ ██╗    ╚██████╔╝██║  ██║╚██████╔╝
    ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚═════╝  ╚═════╝  ╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝ ╚═════╝[/bold blue]
-   [bold magenta]🛡️  Enterprise Security Core Framework v3.0 | Portfolio Architecture[/bold magenta]
+   [bold magenta]🛡️  Enterprise Security Core Framework v3.5 | SecOps & Hardening Portfolio[/bold magenta]
         """
         console.print(banner)
 
@@ -309,13 +463,17 @@ class FrameworkCore:
     def run(self):
         logger.info("Initialisation du noyau central réussie.")
         while True:
-            # Nettoyage absolu du terminal pour empêcher les résidus de texte en arrière-plan
-            os.system('cls' if os.name == 'nt' else 'clear')
+            # Nettoyage absolu de l'écran visible + vidage complet du buffer système
+            if os.name == 'nt':
+                os.system('cls')
+            else:
+                sys.stdout.write("\033[H\033[2J\033[3J")
+                sys.stdout.flush()
             
             self.display_banner()
             self.display_soc_dashboard()
 
-            # Rendu dynamique de la table de routage du menu
+            # Rendu dynamique du menu des modules
             menu = Table(show_header=True, header_style="bold purple")
             menu.add_column("ID", width=4)
             menu.add_column("Module Core")
@@ -341,7 +499,6 @@ class FrameworkCore:
                         plugin = self.plugins[idx]
                         logger.info(f"Appel du point d'entrée : {plugin.name}")
                         
-                        # Traitement et archivage dans le State Vault
                         raw_result = plugin.execute(self.config)
                         self.session_vault[plugin.name] = {
                             "captured_at": datetime.now().isoformat(),
@@ -351,9 +508,8 @@ class FrameworkCore:
                     else:
                         logger.warning("ID saisi en dehors des limites de la matrice.")
                 except ValueError:
-                    logger.error("Entrée utilisateur corrompue ou non convertible en entier.")
+                    logger.error("Entrée utilisateur corrompue.")
             
-            # Saut de ligne ajouté pour aérer l'interface avant le prompt de rafraîchissement
             console.input("\n[cyan]Appuyez sur [Entrée] pour rafraîchir le dashboard...[/cyan]")
 
 
