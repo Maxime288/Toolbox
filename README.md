@@ -1,23 +1,22 @@
-# 🛡️ Enterprise Security Core Framework (v3.0)
+# 🛡️ Enterprise Security Core Framework (v4.0)
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Profile](https://img.shields.io/badge/profile-DevSecOps_/_SecOps-orange.svg)]()
+[![Version](https://img.shields.io/badge/version-4.0.0--ENTERPRISE-red.svg)]()
 
-Un framework d'automatisation et d'audit de sécurité centralisé, conçu selon les standards de l'ingénierie logicielle. Loin du simple script d'automatisation, cet outil intègre un **moteur de calcul de risques contextuels (Risk Engine)**, une architecture orientée objet extensible, un système de double journalisation structurée et une interface utilisateur de type **SOC Dashboard**.
+Un framework d'automatisation et d'audit de sécurité centralisé, conçu selon les standards de l'ingénierie logicielle professionnelle. Cet outil intègre un **moteur de calcul de risques contextuels (Risk Engine)**, une architecture orientée objet extensible (pattern Plugin / SOLID), un système de double journalisation structurée et une interface de type **SOC Dashboard** — le tout sans simulation : chaque module opère sur des cibles réelles.
 
 ---
 
-## 🎯 Architecture & Concepts "Pro" Implémentés
+## 🎯 Architecture & Concepts Implémentés
 
-Ce projet a été développé avec une attention stricte portée à la qualité du code, à la résilience et à la maintenabilité :
-
-- **Pattern Plugin (Extensibilité) :** Utilisation d'une classe de base abstraite (`BasePlugin`) appliquant le principe *Open/Closed* de SOLID. L'ajout d'une nouvelle capacité fonctionnelle ne nécessite aucune modification du noyau principal.
-- **Contextual Risk Engine :** Le framework ne se contente pas d'aligner des résultats bruts. Il implémente un algorithme de corrélation de session qui analyse les vulnérabilités croisées (ex: un port ouvert combiné à un mot de passe compromis) pour calculer un score de criticité global (équivalent à une logique CVSS).
-- **Concurrence Optimisée (`ThreadPoolExecutor`) :** Le scanner réseau effectue ses requêtes de manière asynchrone pour optimiser les performances d'I/O réseau, tout en garantissant la *Thread-Safety* lors des affichages consoles.
-- **Fingerprinting Protocol-Aware :** Le module réseau évite les blocages et les faux positifs en adaptant ses sondes selon le protocole détecté (requêtes HTTP ciblées, interception de signatures SSH/FTP et handshake TLS natif).
-- **Résilience & API Failover :** Le module OSINT encapsule une couche d'abstraction réseau capable de basculer dynamiquement (*Fallback*) sur des nœuds d'API secondaires transparents en cas de panne ou de coupure de service.
-- **Journalisation & Télémétrie :** Implémentation d'un double flux de logs : un flux asynchrone formaté pour l'opérateur (via `RichHandler`) et une persistance détaillée dans `framework.log`. Les résultats consolidés sont sérialisés au format standard JSON.
+- **Pattern Plugin (Open/Closed SOLID) :** Classe de base abstraite `BasePlugin` — l'ajout d'un nouveau module ne nécessite aucune modification du noyau.
+- **Contextual Risk Engine :** Algorithme de corrélation de session qui analyse les vulnérabilités croisées (port ouvert + mot de passe compromis + cert expiré…) pour produire un score de criticité global inspiré du standard CVSS.
+- **Concurrence Optimisée (`ThreadPoolExecutor`) :** Scan réseau asynchrone avec contrôle du nombre de workers, thread-safety garantie sur les affichages console et back-off linéaire sur les modules SSH.
+- **Fingerprinting Protocol-Aware :** Sondes adaptées par protocole — requêtes HTTP ciblées, interception de bannières SSH/FTP/Redis/Elasticsearch, handshake TLS natif.
+- **Résilience & API Failover :** Le module OSINT bascule dynamiquement sur des nœuds secondaires en cas d'indisponibilité de l'API principale.
+- **Journalisation & Télémétrie :** Double flux de logs (opérateur via `RichHandler` + persistance dans `framework.log`). Rapports exportés en **JSON** et **HTML standalone** dans `./reports/`.
 
 ---
 
@@ -25,15 +24,17 @@ Ce projet a été développé avec une attention stricte portée à la qualité 
 
 | # | Module | Description |
 |---|--------|-------------|
-| 1 | 🌐 **Scanner Réseau & Services** | Identification d'état des ports TCP stratégiques avec extraction de bannières applicatives et détection des versions TLS. |
-| 2 | 🔑 **Password Audit Simulator** | Évaluation locale de la robustesse des politiques d'authentification face aux dictionnaires de fuites de données standards. |
-| 3 | 🔍 **Module OSINT Réseau** | Collecte de métadonnées, FAI, ASN et géolocalisation des adresses IP publiques cibles avec routage dynamique. |
+| 1 | 🌐 **Port Scanner TCP + Banner Grab** | Scan concurrent sur plage de ports libre (défaut : 29 ports stratégiques), fingerprinting par protocole (HTTP, SSH, FTP, Redis, Elasticsearch, TLS…). |
+| 2 | 🔒 **SSL/TLS Auditor** | Validité et expiration du certificat, détection des protocoles dépréciés (TLS 1.0/1.1), audit des cipher suites faibles, vérification HSTS. |
+| 3 | 🔍 **OSINT IP / Géoloc / ASN** | Géolocalisation, ISP, ASN, DNS inverse et Whois natif (socket port 43) avec résolution du serveur référent IANA — Fallback multi-API. |
+| 4 | 🧬 **DNS Reconnaissance** | Résolution multi-types (A / AAAA / MX / NS / TXT), détection SPF & DMARC, énumération de 30 sous-domaines courants via DoH (Google). |
+| 5 | 🔑 **SSH Audit + Brute-Force (Paramiko)** | Banner grab, audit `sshd_config` local, attaque par dictionnaire réelle via Paramiko avec retry/back-off, wordlist externe ou intégrée + mutations Leet. |
+| 6 | 💀 **Hash Cracker (dict + mutations)** | Cracking réel par dictionnaire — MD5, SHA1, SHA224, SHA256, SHA512 — avec détection automatique de l'algorithme et génération de mutations. |
+| 7 | 🧪 **Password Policy Auditor (NIST 800-63B)** | Calcul d'entropie, score de force réelle, vérification **HaveIBeenPwned** (k-Anonymity — le mot de passe ne quitte jamais la machine), grade A–F. |
 
 ---
 
 ## 📦 Installation & Dépendances
-
-Le framework limite au maximum l'usage de dépendances tierces pour garantir une portabilité optimale.
 
 ### 1. Clonage du projet
 
@@ -45,14 +46,14 @@ cd Toolbox
 ### 2. Installation des packages requis
 
 ```bash
-pip install rich requests
+pip install rich requests paramiko
 ```
+
+> **Note :** `paramiko` est requis uniquement pour le module SSH (module 5). Les autres modules fonctionnent sans lui.
 
 ---
 
 ## 🖥️ Utilisation
-
-Lancez le framework principal via votre terminal :
 
 ```bash
 python framework_pro.py
@@ -60,33 +61,37 @@ python framework_pro.py
 
 ### Déroulement nominal d'une session d'audit
 
-1. **Exécution des modules :** Sélectionnez et exécutez les modules de votre choix depuis le tableau de bord. Chaque résultat est chiffré et mémorisé dans le coffre d'état (`session_vault`).
-
-2. **Corrélation & Clôture :** Utilisez l'option `R` *(Générer Rapport & Risque Contextuel)*. Le Risk Engine s'active, croise les métadonnées de la session, génère le verdict de sévérité et exporte un rapport d'audit global structuré dans `./reports/`.
+1. **Sélection des modules** depuis le SOC Dashboard — chaque résultat est mémorisé dans le `session_vault`.
+2. **Corrélation & Clôture** via l'option `R` — le Risk Engine croise les métadonnées de session, calcule le score de sévérité global et exporte le rapport dans `./reports/`.
 
 ---
 
-## 📊 Exemple d'Artefact Généré (Rapport JSON)
+## 📊 Artefacts Générés
 
-Les rapports générés sous `./reports/audit_security_*.json` adoptent une structure normalisée prête à être ingérée par un outil tiers ou un SIEM :
+Chaque session produit deux fichiers dans `./reports/` :
+
+**`audit_<timestamp>.json`** — ingérable par un SIEM ou outil tiers :
 
 ```json
 {
     "metadata": {
         "scan_time": "2026-05-17T01:13:44.123456",
-        "engine_version": "3.0.0-ENTERPRISE (All-In-One)"
+        "engine_version": "4.0.0-ENTERPRISE"
     },
     "risk_assessment": {
-        "risk_score_cvss": 6.7,
+        "risk_score": 7.4,
         "severity": "ÉLEVÉE",
-        "risk_factors": [
-            "2 port(s) actif(s) sur la cible réseau",
-            "Identifiant critique présent dans les bases de fuites de données"
+        "factors": [
+            "[Port Scanner] +2.4",
+            "[SSL/TLS Auditor] +3.5",
+            "[SSH Audit] +5.0"
         ]
     },
-    "collected_evidence": { "..." : "..." }
+    "collected_evidence": { "...": "..." }
 }
 ```
+
+**`audit_<timestamp>.html`** — rapport standalone dark-mode, visualisable directement dans un navigateur, avec score de risque colorisé et toutes les preuves en accordéon.
 
 ---
 
