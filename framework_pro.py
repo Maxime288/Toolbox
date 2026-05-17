@@ -12,6 +12,7 @@ Usage légitime uniquement — sur systèmes avec autorisation écrite.
 """
 
 import os
+import re
 import sys
 import time
 import json
