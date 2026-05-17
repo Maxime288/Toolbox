@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️  ENTERPRISE SECURITY CORE FRAMEWORK v4.0
+⚙️  ENTERPRISE SECURITY CORE FRAMEWORK v5.0
 Standards DevSecOps : Architecture Plugin, Concurrence, TLS Audit,
 SSH Real Brute-Force, Port Scanner étendu, Hash Cracker réel,
-CVE Lookup, Whois/DNS Recon, Rapport HTML + JSON.
+CVE Lookup (NVD), Web Scanner HTTP, Email Security Auditor,
+Firewall Prober, Rapport HTML + PDF professionnel.
 
 Usage légitime uniquement — sur systèmes avec autorisation écrite.
 """
@@ -53,10 +54,16 @@ try:
 except ImportError:
     PARAMIKO_OK = False
 
+try:
+    from fpdf import FPDF
+    FPDF_OK = True
+except ImportError:
+    FPDF_OK = False
+
 # ── Configuration centrale ─────────────────────────────────────────────────────
 FRAMEWORK_CONFIG = {
     "framework": {
-        "version": "4.0.0-ENTERPRISE",
+        "version": "5.0.0-ENTERPRISE",
         "reports_dir": "reports",
         "log_file":    "framework.log",
     },
@@ -84,7 +91,10 @@ FRAMEWORK_CONFIG = {
             "mutations": True,
         },
         "dns_recon":    {"timeout": 3},
-        "cve_lookup":   {"timeout": 6},
+        "cve_lookup":   {"timeout": 8},
+        "web_scanner":  {"timeout": 5, "max_workers": 15},
+        "email_audit":  {"timeout": 4},
+        "firewall":     {"timeout": 1.5},
     },
 }
 
@@ -1269,6 +1279,723 @@ class PasswordPolicyPlugin(BasePlugin):
         return report
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE 8 — CVE LOOKUP (NVD / NIST API v2)
+# ══════════════════════════════════════════════════════════════════════════════
+class CveLookupPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "CVE Lookup (NVD/NIST)"
+    @property
+    def description(self) -> str: return "Croise les bannières du scanner avec les CVE NVD — CVSS score + remediation"
+
+    NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+    # Mapping bannière → CPE keyword pour la recherche NVD
+    BANNER_PATTERNS = [
+        (r"OpenSSH[_/ ]?([\d.]+)",          "OpenSSH",     "openssh"),
+        (r"Apache[/ ]([\d.]+)",             "Apache HTTPD","apache_http_server"),
+        (r"nginx[/ ]([\d.]+)",              "nginx",       "nginx"),
+        (r"OpenSSL ([\d.]+\w*)",            "OpenSSL",     "openssl"),
+        (r"vsftpd ([\d.]+)",                "vsftpd",      "vsftpd"),
+        (r"Exim ([\d.]+)",                  "Exim",        "exim"),
+        (r"ProFTPD ([\d.]+)",               "ProFTPD",     "proftpd"),
+        (r"Microsoft-IIS/([\d.]+)",         "IIS",         "iis"),
+        (r"MySQL ([\d.]+)",                 "MySQL",       "mysql"),
+        (r"PostgreSQL ([\d.]+)",            "PostgreSQL",  "postgresql"),
+        (r"Elasticsearch ([\d.]+)",         "Elasticsearch","elasticsearch"),
+        (r"Redis ([\d.]+)",                 "Redis",       "redis"),
+        (r"MongoDB ([\d.]+)",               "MongoDB",     "mongodb"),
+        (r"PHP/([\d.]+)",                   "PHP",         "php"),
+        (r"Samba ([\d.]+)",                 "Samba",       "samba"),
+    ]
+
+    def _extract_services(self, open_ports: list) -> list[dict]:
+        """Extrait les services et versions depuis les bannières du scanner."""
+        services = []
+        for port_info in open_ports:
+            banner = port_info.get("banner", "")
+            service = port_info.get("service", "")
+            for pattern, label, keyword in self.BANNER_PATTERNS:
+                m = re.search(pattern, banner, re.IGNORECASE)
+                if m:
+                    services.append({
+                        "port":    port_info["port"],
+                        "label":   label,
+                        "version": m.group(1),
+                        "keyword": keyword,
+                        "banner":  banner[:80],
+                    })
+                    break
+            else:
+                if service and service not in ("unknown", ""):
+                    services.append({
+                        "port":    port_info["port"],
+                        "label":   service,
+                        "version": "",
+                        "keyword": service.lower(),
+                        "banner":  banner[:80],
+                    })
+        return services
+
+    def _query_nvd(self, keyword: str, version: str, timeout: int) -> list[dict]:
+        """Requête NVD API v2 — recherche par keyword + version."""
+        try:
+            params = {
+                "keywordSearch": f"{keyword} {version}".strip(),
+                "keywordExactMatch": False,
+                "resultsPerPage": 5,
+                "startIndex": 0,
+            }
+            r = requests.get(self.NVD_API, params=params, timeout=timeout,
+                             headers={"User-Agent": "ESF-SecurityAuditor/5.0"})
+            if r.status_code == 403:
+                return [{"error": "Rate limit NVD — réessayez dans 30s ou ajoutez une API key"}]
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            cves = []
+            for item in data.get("vulnerabilities", []):
+                cve  = item.get("cve", {})
+                cve_id = cve.get("id", "?")
+                desc = next(
+                    (d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"),
+                    "No description"
+                )
+                metrics = cve.get("metrics", {})
+                score, severity, vector = None, "?", "?"
+                for metric_key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                    if metric_key in metrics and metrics[metric_key]:
+                        m = metrics[metric_key][0].get("cvssData", {})
+                        score    = m.get("baseScore")
+                        severity = m.get("baseSeverity", "?")
+                        vector   = m.get("vectorString", "?")
+                        break
+                cves.append({
+                    "id":          cve_id,
+                    "score":       score,
+                    "severity":    severity,
+                    "vector":      vector,
+                    "description": desc[:200],
+                    "url":         f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                })
+            return sorted(cves, key=lambda x: (x["score"] or 0), reverse=True)
+        except requests.Timeout:
+            return [{"error": "Timeout NVD API"}]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    def execute(self, config: dict) -> dict:
+        timeout = config["modules"].get("cve_lookup", {}).get("timeout", 6)
+        report = {"services_analyzed": [], "cve_findings": [], "total_critical": 0}
+
+        # Récupérer les données du scanner si disponibles
+        scanner_data = None
+        # On passe la config avec le vault si disponible (injecté par le core)
+        vault = config.get("_vault", {})
+        scanner_entry = vault.get("Port Scanner (TCP/Banner)", {})
+        if scanner_entry:
+            scanner_data = scanner_entry.get("payload", {})
+
+        if scanner_data and scanner_data.get("open_ports"):
+            services = self._extract_services(scanner_data["open_ports"])
+            console.print(f"[dim]Services détectés depuis le scanner : {len(services)}[/dim]")
+        else:
+            console.print("[yellow]Scanner non exécuté — saisie manuelle des services.[/yellow]")
+            services = []
+            while True:
+                svc = Prompt.ask(
+                    "[bold cyan]Service à analyser[/bold cyan] (ex: OpenSSH 8.9, nginx 1.18 — [Enter] pour terminer)",
+                    default=""
+                )
+                if not svc.strip():
+                    break
+                parts = svc.strip().rsplit(" ", 1)
+                keyword = parts[0].lower().replace(" ", "_")
+                version = parts[1] if len(parts) > 1 else ""
+                services.append({"port": 0, "label": parts[0], "version": version,
+                                  "keyword": keyword, "banner": svc})
+
+        if not services:
+            console.print("[red]Aucun service à analyser.[/red]")
+            return report
+
+        report["services_analyzed"] = services
+
+        for svc in services:
+            label   = svc["label"]
+            version = svc["version"]
+            keyword = svc["keyword"]
+
+            console.print(f"[cyan]→ NVD lookup :[/cyan] {label} {version}…")
+            time.sleep(0.6)  # Respect du rate-limit NVD (sans API key : 5 req/30s)
+            cves = self._query_nvd(keyword, version, timeout)
+
+            if cves and "error" not in cves[0]:
+                sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+                for cve in cves:
+                    sev = str(cve.get("severity", "")).upper()
+                    if sev in sev_counts:
+                        sev_counts[sev] += 1
+
+                report["cve_findings"].append({
+                    "service": f"{label} {version}".strip(),
+                    "port":    svc["port"],
+                    "cves":    cves,
+                    "counts":  sev_counts,
+                })
+                report["total_critical"] += sev_counts["CRITICAL"]
+
+                # Affichage
+                tbl = Table(title=f"CVE — {label} {version} (port {svc['port']})",
+                            box=box.SIMPLE_HEAVY)
+                tbl.add_column("CVE ID",    style="bold red", width=18)
+                tbl.add_column("Score",     width=7)
+                tbl.add_column("Sévérité",  width=10)
+                tbl.add_column("Description")
+                for cve in cves[:5]:
+                    score_str = str(cve["score"]) if cve["score"] else "N/A"
+                    sev = cve["severity"].upper()
+                    sev_color = {"CRITICAL":"red","HIGH":"orange1","MEDIUM":"yellow","LOW":"green"}.get(sev,"white")
+                    tbl.add_row(
+                        cve["id"],
+                        f"[{sev_color}]{score_str}[/{sev_color}]",
+                        f"[{sev_color}]{sev}[/{sev_color}]",
+                        cve["description"][:80] + "…"
+                    )
+                console.print(tbl)
+            elif cves and "error" in cves[0]:
+                console.print(f"[yellow]  ⚠ {cves[0]['error']}[/yellow]")
+            else:
+                console.print(f"[dim]  Aucun CVE trouvé pour {label} {version}[/dim]")
+
+        if report["total_critical"] > 0:
+            console.print(Panel(
+                f"[bold red]{report['total_critical']} CVE(s) CRITICAL détectés — action immédiate requise.[/bold red]",
+                border_style="red"
+            ))
+
+        return report
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE 9 — WEB SCANNER HTTP
+# ══════════════════════════════════════════════════════════════════════════════
+class WebScannerPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "Web Scanner HTTP"
+    @property
+    def description(self) -> str: return "Headers sécurité, répertoires cachés, détection techno, vulnérabilités web"
+
+    SECURITY_HEADERS = {
+        "Strict-Transport-Security":      ("ÉLEVÉ",   "HSTS absent — attaques downgrade possibles"),
+        "Content-Security-Policy":        ("ÉLEVÉ",   "CSP absent — risque XSS élevé"),
+        "X-Frame-Options":                ("MOYEN",   "X-Frame-Options absent — risque Clickjacking"),
+        "X-Content-Type-Options":         ("MOYEN",   "X-Content-Type-Options absent — MIME sniffing"),
+        "Referrer-Policy":                ("FAIBLE",  "Referrer-Policy absent — fuite de données"),
+        "Permissions-Policy":             ("FAIBLE",  "Permissions-Policy absent"),
+        "X-XSS-Protection":               ("INFO",    "X-XSS-Protection absent (déprécié mais indicateur)"),
+        "Cross-Origin-Embedder-Policy":   ("FAIBLE",  "COEP absent"),
+        "Cross-Origin-Opener-Policy":     ("FAIBLE",  "COOP absent"),
+    }
+
+    SENSITIVE_PATHS = [
+        "/.env", "/.git/config", "/.git/HEAD", "/wp-config.php", "/config.php",
+        "/admin", "/admin/", "/administrator", "/phpmyadmin", "/phpinfo.php",
+        "/backup", "/backup.zip", "/backup.tar.gz", "/db.sql", "/dump.sql",
+        "/.htaccess", "/robots.txt", "/sitemap.xml", "/crossdomain.xml",
+        "/api/v1", "/api/v2", "/swagger", "/swagger-ui.html", "/api-docs",
+        "/actuator", "/actuator/health", "/actuator/env", "/actuator/mappings",
+        "/console", "/manager/html", "/jmx-console", "/.DS_Store",
+        "/server-status", "/server-info", "/_profiler", "/debug",
+        "/web.config", "/app.config", "/settings.py", "/config.yml",
+        "/.well-known/security.txt", "/security.txt",
+    ]
+
+    TECH_SIGNATURES = {
+        "WordPress":    ["wp-content", "wp-includes", "WordPress"],
+        "Drupal":       ["Drupal", "drupal.js", "sites/default"],
+        "Joomla":       ["Joomla", "/media/jui/", "joomla"],
+        "Laravel":      ["laravel_session", "Laravel"],
+        "Django":       ["csrftoken", "__django"],
+        "Ruby on Rails":["_rails", "Phusion Passenger"],
+        "ASP.NET":      ["ASP.NET", "__VIEWSTATE", "X-AspNet-Version"],
+        "PHP":          ["PHP", "PHPSESSID", "X-Powered-By: PHP"],
+        "nginx":        ["Server: nginx"],
+        "Apache":       ["Server: Apache"],
+        "Cloudflare":   ["cf-ray", "cloudflare"],
+        "Varnish":      ["X-Varnish", "Via: varnish"],
+    }
+
+    def _check_headers(self, url: str, timeout: int) -> tuple[dict, list[str]]:
+        ua = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0"}
+        try:
+            r = requests.head(url, timeout=timeout, verify=False,
+                              allow_redirects=True, headers=ua)
+            headers = {k.lower(): v for k, v in r.headers.items()}
+            findings = []
+            for h, (severity, msg) in self.SECURITY_HEADERS.items():
+                if h.lower() not in headers:
+                    findings.append(f"{severity} — {msg}")
+            # Server header info disclosure
+            if "server" in headers:
+                findings.append(f"INFO — Server header exposé : {headers['server']}")
+            if "x-powered-by" in headers:
+                findings.append(f"INFO — X-Powered-By exposé : {headers['x-powered-by']}")
+            return dict(r.headers), findings
+        except Exception as e:
+            return {}, [f"Connexion impossible : {e}"]
+
+    def _detect_tech(self, url: str, headers: dict, timeout: int) -> list[str]:
+        detected = []
+        headers_str = str(headers).lower()
+        try:
+            r = requests.get(url, timeout=timeout, verify=False,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            body = r.text[:5000]
+        except Exception:
+            body = ""
+
+        combined = headers_str + body.lower()
+        for tech, sigs in self.TECH_SIGNATURES.items():
+            if any(s.lower() in combined for s in sigs):
+                detected.append(tech)
+        return detected
+
+    def _scan_paths(self, base_url: str, timeout: int) -> list[dict]:
+        """Scan concurrent des répertoires/fichiers sensibles."""
+        found = []
+        lock  = threading.Lock()
+
+        def check(path):
+            url = base_url.rstrip("/") + path
+            try:
+                r = requests.get(url, timeout=timeout, verify=False,
+                                 allow_redirects=False,
+                                 headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code in (200, 301, 302, 403, 500):
+                    severity = "CRITIQUE" if r.status_code == 200 and any(
+                        x in path for x in [".env", ".git", "config", "backup", "sql", "phpinfo"]
+                    ) else "MOYEN" if r.status_code == 200 else "INFO"
+                    with lock:
+                        found.append({
+                            "path":     path,
+                            "status":   r.status_code,
+                            "size":     len(r.content),
+                            "severity": severity,
+                        })
+            except Exception:
+                pass
+
+        with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                      BarColumn(bar_width=35), TextColumn("{task.completed}/{task.total}"),
+                      TimeElapsedColumn(), console=console) as prog:
+            task = prog.add_task("[cyan]Scan des chemins sensibles…", total=len(self.SENSITIVE_PATHS))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=15) as ex:
+                futs = {ex.submit(check, p): p for p in self.SENSITIVE_PATHS}
+                for fut in concurrent.futures.as_completed(futs):
+                    prog.advance(task)
+
+        return sorted(found, key=lambda x: x["status"])
+
+    def execute(self, config: dict) -> dict:
+        timeout = config["modules"]["ssl_auditor"]["timeout"]
+        target  = Prompt.ask("[bold cyan]URL cible[/bold cyan]", default="http://127.0.0.1")
+        if not target.startswith(("http://", "https://")):
+            target = "http://" + target
+
+        report = {"target": target, "headers": {}, "technologies": [],
+                  "sensitive_paths": [], "findings": []}
+
+        # ── Headers ──────────────────────────────────────────────────────
+        self.logger.info(f"Audit des headers HTTP : {target}…")
+        headers, findings = self._check_headers(target, timeout)
+        report["headers"]  = headers
+        report["findings"] = findings
+
+        # ── Technologies ─────────────────────────────────────────────────
+        self.logger.info("Détection des technologies…")
+        techs = self._detect_tech(target, headers, timeout)
+        report["technologies"] = techs
+        if techs:
+            console.print(f"[cyan]Technologies détectées :[/cyan] {', '.join(techs)}")
+
+        # ── Répertoires sensibles ─────────────────────────────────────────
+        do_scan = Confirm.ask("[bold cyan]Scanner les répertoires sensibles ?[/bold cyan]", default=True)
+        if do_scan:
+            self.logger.info("Scan des chemins sensibles…")
+            paths = self._scan_paths(target, timeout)
+            report["sensitive_paths"] = paths
+            for p in paths:
+                if p["severity"] == "CRITIQUE":
+                    report["findings"].append(
+                        f"CRITIQUE — Ressource sensible exposée : {p['path']} [{p['status']}]"
+                    )
+
+        # ── Affichage findings ────────────────────────────────────────────
+        if report["findings"]:
+            tbl = Table(title=f"Web Security — {target}", box=box.SIMPLE_HEAVY)
+            tbl.add_column("Sévérité", width=10)
+            tbl.add_column("Finding")
+            for f in report["findings"]:
+                sev = f.split(" — ")[0]
+                color = {"CRITIQUE":"red","ÉLEVÉ":"orange1","MOYEN":"yellow","FAIBLE":"dim","INFO":"cyan"}.get(sev,"white")
+                tbl.add_row(f"[{color}]{sev}[/{color}]", f.split(" — ", 1)[1] if " — " in f else f)
+            console.print(tbl)
+
+        if report["sensitive_paths"]:
+            stbl = Table(title="Chemins accessibles", box=box.SIMPLE_HEAVY)
+            stbl.add_column("Chemin",   style="cyan")
+            stbl.add_column("Status",   width=8)
+            stbl.add_column("Taille",   width=10)
+            stbl.add_column("Sévérité", width=10)
+            for p in report["sensitive_paths"]:
+                color = {"CRITIQUE":"red","MOYEN":"yellow","INFO":"dim"}.get(p["severity"],"white")
+                stbl.add_row(p["path"], str(p["status"]),
+                             f"{p['size']} B", f"[{color}]{p['severity']}[/{color}]")
+            console.print(stbl)
+
+        return report
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE 10 — EMAIL SECURITY AUDITOR
+# ══════════════════════════════════════════════════════════════════════════════
+class EmailSecurityPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "Email Security Auditor"
+    @property
+    def description(self) -> str: return "SPF, DMARC, DKIM, MTA-STS, spoofing risk — audit complet anti-phishing"
+
+    def _doh(self, name: str, rtype: str, timeout: int = 4) -> list[str]:
+        try:
+            r = requests.get("https://dns.google/resolve",
+                             params={"name": name, "type": rtype},
+                             timeout=timeout)
+            return [a["data"] for a in r.json().get("Answer", [])]
+        except Exception:
+            return []
+
+    def _audit_spf(self, domain: str) -> dict:
+        records = self._doh(domain, "TXT")
+        spf = next((r for r in records if "v=spf1" in r), None)
+        result = {"record": spf, "findings": [], "risk": "OK"}
+
+        if not spf:
+            result["findings"].append("CRITIQUE — Aucun enregistrement SPF — domaine spoofable")
+            result["risk"] = "CRITIQUE"
+            return result
+
+        # Analyse du mécanisme
+        if "+all" in spf:
+            result["findings"].append("CRITIQUE — SPF '+all' : TOUS les serveurs autorisés à envoyer — inutile")
+            result["risk"] = "CRITIQUE"
+        elif "?all" in spf:
+            result["findings"].append("ÉLEVÉ — SPF '?all' : politique neutre, pas de rejet")
+            result["risk"] = "ÉLEVÉ"
+        elif "~all" in spf:
+            result["findings"].append("MOYEN — SPF '~all' (softfail) : les spams ne sont pas rejetés")
+            result["risk"] = "MOYEN"
+        elif "-all" in spf:
+            result["findings"].append("✓ SPF '-all' : politique stricte — correct")
+
+        # Nombre de lookups DNS (max 10 selon RFC)
+        lookups = spf.count("include:") + spf.count("redirect=") + spf.count("a:") + spf.count("mx")
+        if lookups > 8:
+            result["findings"].append(f"MOYEN — {lookups} lookups DNS dans SPF (limite RFC : 10)")
+
+        return result
+
+    def _audit_dmarc(self, domain: str) -> dict:
+        records = self._doh(f"_dmarc.{domain}", "TXT")
+        dmarc   = next((r for r in records if "v=DMARC1" in r), None)
+        result  = {"record": dmarc, "findings": [], "risk": "OK"}
+
+        if not dmarc:
+            result["findings"].append("CRITIQUE — Aucun enregistrement DMARC — emails falsifiables")
+            result["risk"] = "CRITIQUE"
+            return result
+
+        # Politique p=
+        if "p=none" in dmarc:
+            result["findings"].append("ÉLEVÉ — DMARC p=none : aucun rejet, monitoring only")
+            result["risk"] = "ÉLEVÉ"
+        elif "p=quarantine" in dmarc:
+            result["findings"].append("MOYEN — DMARC p=quarantine : spam folder, pas de rejet")
+            result["risk"] = "MOYEN"
+        elif "p=reject" in dmarc:
+            result["findings"].append("✓ DMARC p=reject : politique maximale — correct")
+
+        # pct= (pourcentage d'application)
+        m = re.search(r"pct=(\d+)", dmarc)
+        if m and int(m.group(1)) < 100:
+            result["findings"].append(f"MOYEN — DMARC pct={m.group(1)}% : politique partielle")
+
+        # rua= (rapport agrégé)
+        if "rua=" not in dmarc:
+            result["findings"].append("FAIBLE — Pas de rua= : aucun rapport DMARC envoyé")
+
+        return result
+
+    def _audit_dkim(self, domain: str) -> dict:
+        """Teste les sélecteurs DKIM courants."""
+        selectors = ["default", "google", "k1", "mail", "key1", "dkim",
+                     "s1", "s2", "smtp", "email", "selector1", "selector2"]
+        found = []
+        for sel in selectors:
+            records = self._doh(f"{sel}._domainkey.{domain}", "TXT")
+            for r in records:
+                if "v=DKIM1" in r or "p=" in r:
+                    found.append({"selector": sel, "record": r[:100]})
+                    break
+        return {
+            "selectors_found": found,
+            "count": len(found),
+            "finding": "✓ DKIM configuré" if found else "MOYEN — Aucun sélecteur DKIM courant trouvé",
+        }
+
+    def _audit_mta_sts(self, domain: str) -> dict:
+        """MTA-STS — force le chiffrement TLS pour la réception d'email."""
+        records = self._doh(f"_mta-sts.{domain}", "TXT")
+        sts_dns = next((r for r in records if "v=STSv1" in r), None)
+        try:
+            r = requests.get(f"https://mta-sts.{domain}/.well-known/mta-sts.txt",
+                             timeout=4, verify=False)
+            policy = r.text[:300] if r.status_code == 200 else None
+        except Exception:
+            policy = None
+        return {
+            "dns_record":  sts_dns,
+            "policy_file": policy,
+            "enabled":     bool(sts_dns and policy),
+            "finding":     "✓ MTA-STS actif" if (sts_dns and policy) else "INFO — MTA-STS non configuré",
+        }
+
+    def _test_spoofing(self, domain: str) -> dict:
+        """Évalue le risque de spoofing basé sur SPF + DMARC combinés."""
+        spf_r   = self._doh(domain, "TXT")
+        dmarc_r = self._doh(f"_dmarc.{domain}", "TXT")
+        spf     = next((r for r in spf_r if "v=spf1" in r), None)
+        dmarc   = next((r for r in dmarc_r if "v=DMARC1" in r), None)
+
+        if not spf and not dmarc:
+            return {"risk": "CRITIQUE", "msg": "Pas de SPF ni DMARC — spoofing trivial"}
+        if not dmarc or "p=none" in (dmarc or ""):
+            return {"risk": "ÉLEVÉ", "msg": "DMARC absent ou p=none — spoofing probable"}
+        if "~all" in (spf or "") and "p=quarantine" in (dmarc or ""):
+            return {"risk": "MOYEN", "msg": "SPF softfail + DMARC quarantine — risque résiduel"}
+        if "-all" in (spf or "") and "p=reject" in (dmarc or ""):
+            return {"risk": "FAIBLE", "msg": "SPF strict + DMARC reject — bonne protection"}
+        return {"risk": "MOYEN", "msg": "Configuration partielle — vérifiez SPF et DMARC"}
+
+    def execute(self, config: dict) -> dict:
+        domain = Prompt.ask("[bold cyan]Domaine email à auditer[/bold cyan]", default="google.com")
+        report = {"domain": domain, "spf": {}, "dmarc": {}, "dkim": {},
+                  "mta_sts": {}, "spoofing_risk": {}, "findings": []}
+
+        with console.status("[cyan]Audit SPF…[/cyan]"):
+            report["spf"] = self._audit_spf(domain)
+        with console.status("[cyan]Audit DMARC…[/cyan]"):
+            report["dmarc"] = self._audit_dmarc(domain)
+        with console.status("[cyan]Recherche DKIM…[/cyan]"):
+            report["dkim"] = self._audit_dkim(domain)
+        with console.status("[cyan]Vérification MTA-STS…[/cyan]"):
+            report["mta_sts"] = self._audit_mta_sts(domain)
+
+        report["spoofing_risk"] = self._test_spoofing(domain)
+
+        # Consolidation findings
+        for section in ("spf", "dmarc"):
+            report["findings"].extend(report[section].get("findings", []))
+        report["findings"].append(report["dkim"]["finding"])
+        report["findings"].append(report["mta_sts"]["finding"])
+
+        # Affichage
+        risk     = report["spoofing_risk"]
+        risk_col = {"CRITIQUE":"red","ÉLEVÉ":"orange1","MOYEN":"yellow","FAIBLE":"green"}.get(risk["risk"],"white")
+
+        tbl = Table(title=f"Email Security — {domain}", box=box.SIMPLE_HEAVY)
+        tbl.add_column("Composant", style="yellow", width=12)
+        tbl.add_column("Statut")
+        tbl.add_column("Détail")
+
+        def _status(d, key="risk"):
+            v = d.get(key, "?")
+            c = {"OK":"green","CRITIQUE":"red","ÉLEVÉ":"orange1","MOYEN":"yellow","FAIBLE":"dim"}.get(v,"white")
+            return f"[{c}]{v}[/{c}]"
+
+        spf_rec   = report["spf"].get("record", "ABSENT") or "ABSENT"
+        dmarc_rec = report["dmarc"].get("record", "ABSENT") or "ABSENT"
+        tbl.add_row("SPF",     _status(report["spf"]),   spf_rec[:70])
+        tbl.add_row("DMARC",   _status(report["dmarc"]), dmarc_rec[:70])
+        tbl.add_row("DKIM",    "─", f"{report['dkim']['count']} sélecteur(s) trouvé(s)")
+        tbl.add_row("MTA-STS", "─", report["mta_sts"]["finding"])
+        tbl.add_row("Spoofing", f"[{risk_col}]{risk['risk']}[/{risk_col}]", risk["msg"])
+        console.print(tbl)
+
+        findings = [f for f in report["findings"] if not f.startswith("✓")]
+        if findings:
+            console.print(Panel(
+                "\n".join(f"  • {f}" for f in findings),
+                title="[red]Email Security Findings[/red]", border_style="red"
+            ))
+
+        return report
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODULE 11 — FIREWALL / EXPOSURE PROBER
+# ══════════════════════════════════════════════════════════════════════════════
+class FirewallProberPlugin(BasePlugin):
+    @property
+    def name(self) -> str: return "Firewall / Exposure Prober"
+    @property
+    def description(self) -> str: return "Détecte les services critiques exposés sans auth (Redis, MongoDB, Jupyter…)"
+
+    # Services qui ne devraient JAMAIS être exposés publiquement
+    CRITICAL_EXPOSURES = [
+        {"port": 6379,  "service": "Redis",          "probe": b"PING\r\n",
+         "expected": "+PONG",   "auth_probe": b"AUTH wrongpassword\r\n", "auth_err": "NOAUTH"},
+        {"port": 27017, "service": "MongoDB",         "probe": None,
+         "expected": None,      "auth_probe": None, "auth_err": None},
+        {"port": 9200,  "service": "Elasticsearch",   "probe": b"GET / HTTP/1.0\r\n\r\n",
+         "expected": "cluster_name", "auth_probe": None, "auth_err": None},
+        {"port": 8888,  "service": "Jupyter",         "probe": b"GET / HTTP/1.0\r\n\r\n",
+         "expected": "jupyter", "auth_probe": None, "auth_err": None},
+        {"port": 5432,  "service": "PostgreSQL",      "probe": None,
+         "expected": None,      "auth_probe": None, "auth_err": None},
+        {"port": 3306,  "service": "MySQL",           "probe": None,
+         "expected": None,      "auth_probe": None, "auth_err": None},
+        {"port": 5984,  "service": "CouchDB",         "probe": b"GET / HTTP/1.0\r\n\r\n",
+         "expected": "couchdb", "auth_probe": None, "auth_err": None},
+        {"port": 2375,  "service": "Docker API",      "probe": b"GET /version HTTP/1.0\r\n\r\n",
+         "expected": "ApiVersion", "auth_probe": None, "auth_err": None},
+        {"port": 2379,  "service": "etcd",            "probe": b"GET /version HTTP/1.0\r\n\r\n",
+         "expected": "etcdserver", "auth_probe": None, "auth_err": None},
+        {"port": 4243,  "service": "Docker alt",      "probe": b"GET /version HTTP/1.0\r\n\r\n",
+         "expected": "ApiVersion", "auth_probe": None, "auth_err": None},
+        {"port": 11211, "service": "Memcached",       "probe": b"stats\r\n",
+         "expected": "STAT",    "auth_probe": None, "auth_err": None},
+        {"port": 9042,  "service": "Cassandra",       "probe": None,
+         "expected": None,      "auth_probe": None, "auth_err": None},
+        {"port": 7474,  "service": "Neo4j HTTP",      "probe": b"GET / HTTP/1.0\r\n\r\n",
+         "expected": "neo4j",   "auth_probe": None, "auth_err": None},
+        {"port": 4848,  "service": "GlassFish Admin", "probe": b"GET / HTTP/1.0\r\n\r\n",
+         "expected": "GlassFish", "auth_probe": None, "auth_err": None},
+        {"port": 9090,  "service": "Prometheus",      "probe": b"GET /metrics HTTP/1.0\r\n\r\n",
+         "expected": "# HELP",  "auth_probe": None, "auth_err": None},
+        {"port": 3000,  "service": "Grafana",         "probe": b"GET /api/health HTTP/1.0\r\n\r\n",
+         "expected": "database", "auth_probe": None, "auth_err": None},
+    ]
+
+    def _probe_service(self, target: str, svc: dict, timeout: float) -> dict | None:
+        port = svc["port"]
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                if s.connect_ex((target, port)) != 0:
+                    return None  # Port fermé
+
+                exposed   = False
+                no_auth   = False
+                banner    = ""
+
+                if svc["probe"]:
+                    s.sendall(svc["probe"])
+                    try:
+                        banner = s.recv(1024).decode(errors="ignore")
+                    except Exception:
+                        pass
+                    if svc["expected"] and svc["expected"].lower() in banner.lower():
+                        exposed = True
+                        # Tester l'absence d'authentification
+                        if svc["auth_probe"] and svc["auth_err"]:
+                            try:
+                                s.sendall(svc["auth_probe"])
+                                auth_resp = s.recv(256).decode(errors="ignore")
+                                # Si NOAUTH → auth requise (bon signe)
+                                # Si pas d'erreur → pas d'auth (mauvais signe)
+                                no_auth = svc["auth_err"] not in auth_resp
+                            except Exception:
+                                no_auth = True
+                        else:
+                            no_auth = True  # Pas de mécanisme d'auth connu
+                else:
+                    # Port ouvert suffit pour les DB avec protocole binaire
+                    exposed = True
+                    no_auth = True
+
+                if exposed:
+                    return {
+                        "port":    port,
+                        "service": svc["service"],
+                        "no_auth": no_auth,
+                        "banner":  banner[:100],
+                        "severity": "CRITIQUE" if no_auth else "ÉLEVÉ",
+                    }
+        except Exception:
+            pass
+        return None
+
+    def execute(self, config: dict) -> dict:
+        cfg    = config["modules"]["network_scan"]
+        target = Prompt.ask("[bold cyan]Cible à sonder[/bold cyan]", default="127.0.0.1")
+        ip     = _resolve(target)
+        report = {"target": target, "ip": ip, "exposed": [], "findings": []}
+
+        console.print(f"[dim]Sondage de {len(self.CRITICAL_EXPOSURES)} services critiques sur {target}…[/dim]")
+
+        with Progress(SpinnerColumn(), TextColumn("{task.description}"),
+                      BarColumn(bar_width=35), TextColumn("{task.completed}/{task.total}"),
+                      TimeElapsedColumn(), console=console) as prog:
+            task = prog.add_task("[red]Firewall Prober…", total=len(self.CRITICAL_EXPOSURES))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+                futs = {ex.submit(self._probe_service, ip, svc, cfg["timeout"]): svc
+                        for svc in self.CRITICAL_EXPOSURES}
+                for fut in concurrent.futures.as_completed(futs):
+                    prog.advance(task)
+                    result = fut.result()
+                    if result:
+                        report["exposed"].append(result)
+
+        report["exposed"].sort(key=lambda x: x["port"])
+
+        if report["exposed"]:
+            tbl = Table(title=f"Services exposés — {target}", box=box.SIMPLE_HEAVY)
+            tbl.add_column("Port",    width=8)
+            tbl.add_column("Service", style="cyan", width=16)
+            tbl.add_column("Auth",    width=10)
+            tbl.add_column("Sévérité",width=10)
+            tbl.add_column("Bannière")
+
+            for svc in report["exposed"]:
+                auth_str = "[red]ABSENT[/red]" if svc["no_auth"] else "[green]Présente[/green]"
+                sev_col  = "red" if svc["severity"] == "CRITIQUE" else "orange1"
+                tbl.add_row(
+                    str(svc["port"]), svc["service"], auth_str,
+                    f"[{sev_col}]{svc['severity']}[/{sev_col}]",
+                    svc["banner"][:60] or "(connexion établie)"
+                )
+                report["findings"].append(
+                    f"{svc['severity']} — {svc['service']} (port {svc['port']}) "
+                    f"exposé{'sans authentification' if svc['no_auth'] else ''}"
+                )
+            console.print(tbl)
+
+            critique_count = sum(1 for s in report["exposed"] if s["severity"] == "CRITIQUE")
+            if critique_count:
+                console.print(Panel(
+                    f"[bold red]{critique_count} service(s) CRITIQUE(s) exposés sans authentification.[/bold red]\n"
+                    "[dim]Ces services permettent un accès direct aux données — isolez-les immédiatement.[/dim]",
+                    border_style="red"
+                ))
+        else:
+            console.print("[green]✓ Aucun service critique exposé détecté.[/green]")
+
+        return report
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RISK ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1292,6 +2019,23 @@ class ContextualRiskEngine:
             0.5 * len(d.get("subdomains", [])) +
             (1.0 if not d.get("spf") else 0) +
             (1.0 if not d.get("dmarc") else 0)
+        ),
+        "CVE Lookup (NVD/NIST)":               lambda d: (
+            d.get("total_critical", 0) * 2.5 +
+            sum(1.0 for f in d.get("cve_findings", []) if f.get("counts", {}).get("HIGH", 0) > 0)
+        ),
+        "Web Scanner HTTP":                     lambda d: sum(
+            3.0 if "CRITIQUE" in f else 1.5 if "ÉLEVÉ" in f else 0.5 if "MOYEN" in f else 0
+            for f in d.get("findings", [])
+        ),
+        "Email Security Auditor":               lambda d: (
+            (3.0 if d.get("spoofing_risk", {}).get("risk") == "CRITIQUE" else
+             2.0 if d.get("spoofing_risk", {}).get("risk") == "ÉLEVÉ" else
+             1.0 if d.get("spoofing_risk", {}).get("risk") == "MOYEN" else 0)
+        ),
+        "Firewall / Exposure Prober":           lambda d: (
+            sum(3.5 if s.get("severity") == "CRITIQUE" else 2.0
+                for s in d.get("exposed", []))
         ),
     }
 
@@ -1403,6 +2147,151 @@ def _generate_html_report(report_data: dict, filename: str) -> str:
     return html_path
 
 
+
+def _generate_pdf_report(report_data: dict, json_path: str) -> str | None:
+    """Génère un rapport PDF professionnel avec fpdf2."""
+    if not FPDF_OK:
+        logger.warning("fpdf2 non disponible — pip install fpdf2")
+        return None
+
+    risk     = report_data["risk_assessment"]
+    score    = risk["risk_score"]
+    sev      = risk["severity"]
+    sev_rgb  = {
+        "CRITIQUE": (229, 57,  53),
+        "ÉLEVÉE":   (251, 140,  0),
+        "MODÉRÉE":  (253, 216, 53),
+        "FAIBLE":   ( 67, 160, 71),
+    }.get(sev, (100, 100, 100))
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # ── Page de garde ──────────────────────────────────────────────────────
+    pdf.set_fill_color(13, 17, 23)
+    pdf.rect(0, 0, 210, 297, "F")
+
+    pdf.set_font("Helvetica", "B", 28)
+    pdf.set_text_color(88, 166, 255)
+    pdf.set_xy(15, 30)
+    pdf.cell(0, 12, "Enterprise Security Framework", ln=True, align="C")
+
+    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_text_color(200, 200, 200)
+    pdf.cell(0, 10, "Rapport d'Audit de Sécurité", ln=True, align="C")
+
+    pdf.set_font("Helvetica", "", 11)
+    pdf.set_text_color(139, 148, 158)
+    pdf.cell(0, 8, f"Version {report_data['metadata']['engine_version']}", ln=True, align="C")
+    pdf.cell(0, 8, f"Généré le {report_data['metadata']['scan_time'][:19].replace('T', ' à ')}", ln=True, align="C")
+
+    # Score de risque
+    pdf.set_xy(15, 100)
+    pdf.set_font("Helvetica", "B", 72)
+    pdf.set_text_color(*sev_rgb)
+    pdf.cell(0, 30, f"{score}/10", ln=True, align="C")
+
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.cell(0, 12, sev, ln=True, align="C")
+
+    # Ligne séparatrice
+    pdf.set_draw_color(*sev_rgb)
+    pdf.set_line_width(0.8)
+    pdf.line(30, 165, 180, 165)
+
+    # Facteurs
+    pdf.set_xy(15, 170)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(88, 166, 255)
+    pdf.cell(0, 8, "Facteurs de risque :", ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(200, 200, 200)
+    for factor in risk.get("factors", [])[:10]:
+        pdf.set_x(20)
+        pdf.cell(0, 6, f"  > {factor}", ln=True)
+
+    # Disclaimer
+    pdf.set_xy(15, 265)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 5, "Usage strictement autorise - sur systemes avec consentement ecrit explicite", align="C")
+
+    # ── Pages de détail par module ─────────────────────────────────────────
+    for module_name, module_data in report_data.get("collected_evidence", {}).items():
+        pdf.add_page()
+        pdf.set_fill_color(22, 27, 34)
+        pdf.rect(0, 0, 210, 297, "F")
+
+        # En-tête module
+        pdf.set_fill_color(*sev_rgb)
+        pdf.rect(0, 0, 210, 18, "F")
+        pdf.set_xy(10, 4)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(0, 10, f"Module : {module_name}", ln=True)
+
+        pdf.set_xy(10, 20)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(139, 148, 158)
+        pdf.cell(0, 5, f"Capturé le {module_data.get('captured_at','')[:19].replace('T',' ')}", ln=True)
+
+        payload = module_data.get("payload", {})
+
+        # Findings si présents
+        findings = payload.get("findings", [])
+        if findings:
+            pdf.set_xy(10, 30)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(229, 57, 53)
+            pdf.cell(0, 7, "Findings :", ln=True)
+            pdf.set_font("Helvetica", "", 9)
+            for f in findings[:15]:
+                pdf.set_text_color(200, 200, 200)
+                sev_f = f.split(" — ")[0] if " — " in f else ""
+                rgb   = {"CRITIQUE":(229,57,53),"ÉLEVÉ":(251,140,0),"MOYEN":(253,216,53),"FAIBLE":(67,160,71)}.get(sev_f,(150,150,150))
+                pdf.set_text_color(*rgb)
+                pdf.set_x(15)
+                safe_f = f.encode('latin-1', errors='replace').decode('latin-1')
+                pdf.cell(0, 5, f"  • {safe_f[:100]}", ln=True)
+
+        # Données clés selon le module
+        pdf.set_y(pdf.get_y() + 5)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(88, 166, 255)
+        pdf.cell(0, 6, "Données collectées :", ln=True)
+        pdf.set_font("Courier", "", 7.5)
+        pdf.set_text_color(180, 180, 180)
+
+        # Sérialiser le payload de façon lisible
+        def _safe(v):
+            s = str(v)[:120]
+            return s.encode('latin-1', errors='replace').decode('latin-1')
+
+        for key, val in payload.items():
+            if key in ("findings", "san_sample"):
+                continue
+            if isinstance(val, list):
+                pdf.set_x(12)
+                pdf.cell(0, 4.5, f"{key}: [{len(val)} items]", ln=True)
+            elif isinstance(val, dict):
+                pdf.set_x(12)
+                pdf.cell(0, 4.5, f"{key}: {{...}}", ln=True)
+            else:
+                pdf.set_x(12)
+                pdf.cell(0, 4.5, f"{key}: {_safe(val)}", ln=True)
+            if pdf.get_y() > 270:
+                break
+
+    pdf_path = json_path.replace(".json", ".pdf")
+    try:
+        pdf.output(pdf_path)
+        return pdf_path
+    except Exception as e:
+        logger.error(f"Erreur génération PDF : {e}")
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ORCHESTRATEUR CENTRAL
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1417,6 +2306,10 @@ class FrameworkCore:
             SshAuditPlugin(),
             HashCrackerPlugin(),
             PasswordPolicyPlugin(),
+            CveLookupPlugin(),
+            WebScannerPlugin(),
+            EmailSecurityPlugin(),
+            FirewallProberPlugin(),
         ]
         self.session_vault: dict = {}
         Path(self.config["framework"]["reports_dir"]).mkdir(exist_ok=True)
@@ -1430,7 +2323,7 @@ class FrameworkCore:
  ██╔══╝  ╚════██║██╔══╝      ╚██╗ ██╔╝╚════██║
  ███████╗███████║██║          ╚████╔╝      ██║
  ╚══════╝╚══════╝╚═╝           ╚═══╝       ╚═╝[/bold blue]
-  [bold magenta]Enterprise Security Framework v4.0 — DevSecOps / SecOps[/bold magenta]
+  [bold magenta]Enterprise Security Framework v5.0 — DevSecOps / SecOps / 11 Modules[/bold magenta]
   [dim]Usage strictement autorisé — sur systèmes avec consentement écrit[/dim]
         """
         console.print(banner)
@@ -1476,24 +2369,26 @@ class FrameworkCore:
             json.dump(report_data, f, indent=2, ensure_ascii=False, default=str)
 
         html_path = _generate_html_report(report_data, json_path)
+        pdf_path  = _generate_pdf_report(report_data, json_path)
 
         sev_color = {
             "CRITIQUE": "bold red", "ÉLEVÉE": "bold orange1",
             "MODÉRÉE": "bold yellow", "FAIBLE": "bold green"
         }.get(risk["severity"], "white")
 
+        pdf_line = f"\n[dim]PDF   → {pdf_path}[/dim]" if pdf_path else ""
         console.print(Panel(
             f"[bold]Score de Risque Global :[/bold] [{sev_color}]{risk['risk_score']}/10[/{sev_color}]\n"
             f"[bold]Sévérité :[/bold] [{sev_color}]{risk['severity']}[/{sev_color}]\n\n"
             f"[bold]Facteurs :[/bold]\n" + "\n".join(f"  • {f}" for f in risk["factors"]) +
             f"\n\n[dim]JSON  → {json_path}[/dim]\n"
-            f"[dim]HTML  → {html_path}[/dim]",
+            f"[dim]HTML  → {html_path}[/dim]{pdf_line}",
             title="🎯 CONTEXTUAL RISK ASSESSMENT", border_style="red"
         ))
 
     # ── Boucle principale ──────────────────────────────────────────────────
     def run(self):
-        logger.info("ESF v4.0 — Noyau central initialisé.")
+        logger.info("ESF v5.0 — Noyau central initialisé.")
         while True:
             if os.name == "nt":
                 os.system("cls")
@@ -1520,6 +2415,7 @@ class FrameworkCore:
                         logger.info(f"Module lancé : {plugin.name}")
                         console.print(f"\n[bold cyan]━━ {plugin.name} ━━[/bold cyan]\n")
                         try:
+                            self.config["_vault"] = self.session_vault
                             result = plugin.execute(self.config)
                             self.session_vault[plugin.name] = {
                                 "captured_at": datetime.now().isoformat(),
