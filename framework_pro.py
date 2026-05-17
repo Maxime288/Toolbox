@@ -293,27 +293,68 @@ class SslAuditorPlugin(BasePlugin):
     }
 
     def _cert_info(self, target: str, port: int, timeout: float) -> dict:
+        # CERT_REQUIRED est indispensable : avec CERT_NONE, getpeercert()
+        # retourne un dict vide (pas de notAfter, pas de subject).
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
-        with socket.create_connection((target, port), timeout=timeout) as raw:
-            with ctx.wrap_socket(raw, server_hostname=target) as ssock:
-                cert   = ssock.getpeercert()
-                cipher = ssock.cipher()
-                proto  = ssock.version()
-                return {"cert": cert, "cipher": cipher, "proto": proto}
+        ctx.verify_mode    = ssl.CERT_REQUIRED
+        try:
+            with socket.create_connection((target, port), timeout=timeout) as raw:
+                with ctx.wrap_socket(raw, server_hostname=target) as ssock:
+                    cert   = ssock.getpeercert()
+                    cipher = ssock.cipher()
+                    proto  = ssock.version()
+                    return {"cert": cert, "cipher": cipher, "proto": proto}
+        except ssl.SSLCertVerificationError:
+            # Cert auto-signé ou chaîne incomplète — on désactive la vérif
+            # mais on récupère quand même les métadonnées via binary_form
+            ctx2 = ssl.create_default_context()
+            ctx2.check_hostname = False
+            ctx2.verify_mode    = ssl.CERT_NONE
+            with socket.create_connection((target, port), timeout=timeout) as raw:
+                with ctx2.wrap_socket(raw, server_hostname=target) as ssock:
+                    der    = ssock.getpeercert(binary_form=True)
+                    cipher = ssock.cipher()
+                    proto  = ssock.version()
+            # Ré-extraire les métadonnées depuis le DER via un contexte de décodage
+            pem  = ssl.DER_cert_to_PEM_cert(der)
+            cert = ssl.PEM_cert_to_DER_cert  # juste pour vérifier la dispo
+            # Utiliser x509 stdlib (Python 3.9+)
+            import tempfile, os
+            with tempfile.NamedTemporaryFile(suffix=".pem", delete=False, mode="w") as tf:
+                tf.write(pem)
+                tf_name = tf.name
+            try:
+                cert = ssl._ssl._test_decode_cert(tf_name)
+            except Exception:
+                cert = {}
+            finally:
+                os.unlink(tf_name)
+            return {"cert": cert, "cipher": cipher, "proto": proto}
 
     def _check_deprecated(self, target: str, port: int, timeout: float) -> list[str]:
-        """Tente une connexion avec chaque protocole déprécié."""
+        """Tente une connexion avec chaque protocole déprécié (TLS 1.0, 1.1).
+        Les DeprecationWarning Python sont filtrés — ils ne polluent pas la console.
+        """
+        import warnings
         weak = []
-        deprecated = {"TLSv1": ssl.TLSVersion.TLSv1, "TLSv1.1": ssl.TLSVersion.TLSv1_1}
+        deprecated = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            for attr, label in (("TLSv1", "TLSv1"), ("TLSv1_1", "TLSv1.1")):
+                ver = getattr(ssl.TLSVersion, attr, None)
+                if ver is not None:
+                    deprecated[label] = ver
+
         for name, ver in deprecated.items():
             try:
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                ctx.check_hostname = False
-                ctx.verify_mode    = ssl.CERT_NONE
-                ctx.maximum_version = ver
-                ctx.minimum_version = ver
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ctx.check_hostname  = False
+                    ctx.verify_mode     = ssl.CERT_NONE
+                    ctx.maximum_version = ver
+                    ctx.minimum_version = ver
                 with socket.create_connection((target, port), timeout=timeout) as raw:
                     with ctx.wrap_socket(raw, server_hostname=target):
                         weak.append(name)
@@ -352,10 +393,15 @@ class SslAuditorPlugin(BasePlugin):
             issuer  = dict(x[0] for x in cert.get("issuer", []))
             subject = dict(x[0] for x in cert.get("subject", []))
             not_after_str = cert.get("notAfter", "")
-            exp_date      = datetime.strptime(not_after_str, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
-            now           = datetime.now(timezone.utc)
-            days_left     = (exp_date - now).days
-            expired       = days_left < 0
+            if not not_after_str:
+                raise ValueError("notAfter vide — certificat non lisible")
+            # ssl.cert_time_to_seconds gère correctement les jours < 10
+            # (ex: "Jun  6 06:39:24 2026 GMT" avec double espace)
+            ts        = ssl.cert_time_to_seconds(not_after_str)
+            exp_date  = datetime.fromtimestamp(ts, tz=timezone.utc)
+            now       = datetime.now(timezone.utc)
+            days_left = (exp_date - now).days
+            expired   = days_left < 0
 
             sans = [v for _, v in cert.get("subjectAltName", [])]
 
