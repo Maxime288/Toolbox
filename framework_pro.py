@@ -333,46 +333,130 @@ class SslAuditorPlugin(BasePlugin):
             return {"cert": cert, "cipher": cipher, "proto": proto}
 
     def _check_deprecated(self, target: str, port: int, timeout: float) -> list[str]:
-        """Tente une connexion avec chaque protocole déprécié (TLS 1.0, 1.1).
-        Les DeprecationWarning Python sont filtrés — ils ne polluent pas la console.
-        """
-        import warnings
-        weak = []
-        deprecated = {}
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            for attr, label in (("TLSv1", "TLSv1"), ("TLSv1_1", "TLSv1.1")):
-                ver = getattr(ssl.TLSVersion, attr, None)
-                if ver is not None:
-                    deprecated[label] = ver
+        """Test réel des protocoles dépréciés via openssl s_client.
 
-        for name, ver in deprecated.items():
+        OpenSSL 3.x a retiré TLS 1.0/1.1 côté client par défaut.
+        La librairie ssl Python hérite de ce comportement : utiliser
+        ctx.minimum_version = TLSv1 échoue côté LOCAL, pas côté serveur,
+        ce qui génère des faux positifs. On délègue à openssl s_client
+        qui peut forcer ces protocoles, et on interprète la réponse :
+          - 'no protocols available' → client local incapable (indéterminable)
+          - Cipher is (NONE)         → serveur a refusé (rejeté)
+          - Cipher is <algo>         → serveur a accepté (vulnérable)
+        """
+        weak = []
+        indeterminate = []
+
+        for proto_flag, label in [("-tls1", "TLSv1"), ("-tls1_1", "TLSv1.1")]:
             try:
+                result = subprocess.run(
+                    ["openssl", "s_client", "-connect", f"{target}:{port}",
+                     proto_flag, "-legacy_renegotiation"],
+                    input=b"", capture_output=True, timeout=timeout,
+                )
+                output = (result.stdout + result.stderr).decode(errors="ignore")
+
+                if "no protocols available" in output:
+                    # OpenSSL 3.x local a désactivé ce protocole côté client
+                    # → impossible de conclure depuis ce poste d'audit
+                    indeterminate.append(label)
+                elif re.search(r"Cipher is (?!\(NONE\))\S+", output):
+                    # Handshake complet : le serveur accepte ce protocole
+                    weak.append(label)
+                # Sinon : alert / handshake failure = serveur a refusé → OK
+
+            except FileNotFoundError:
+                # openssl non disponible → fallback Python avec avertissement
+                import warnings
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
-                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                    ctx.check_hostname  = False
-                    ctx.verify_mode     = ssl.CERT_NONE
-                    ctx.maximum_version = ver
-                    ctx.minimum_version = ver
-                with socket.create_connection((target, port), timeout=timeout) as raw:
-                    with ctx.wrap_socket(raw, server_hostname=target):
-                        weak.append(name)
+                    ver_attr = "TLSv1" if label == "TLSv1" else "TLSv1_1"
+                    ver = getattr(ssl.TLSVersion, ver_attr, None)
+                if ver is None:
+                    indeterminate.append(label)
+                    continue
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                        ctx.check_hostname  = False
+                        ctx.verify_mode     = ssl.CERT_NONE
+                        ctx.maximum_version = ver
+                        ctx.minimum_version = ver
+                    with socket.create_connection((target, port), timeout=timeout) as raw:
+                        with ctx.wrap_socket(raw, server_hostname=target):
+                            weak.append(label)
+                except Exception:
+                    pass
+            except subprocess.TimeoutExpired:
+                pass
             except Exception:
                 pass
+
+        # Stocker les protocoles indéterminables pour affichage
+        self._tls_indeterminate = indeterminate
         return weak
 
+    # Domaines connus comme preloaded (liste partielle — source: chromium.org/hsts)
+    HSTS_PRELOADED = {
+        "google.com", "youtube.com", "gmail.com", "android.com",
+        "github.com", "facebook.com", "twitter.com", "instagram.com",
+        "cloudflare.com", "stripe.com", "paypal.com", "apple.com",
+        "microsoft.com", "amazon.com", "netflix.com", "linkedin.com",
+        "dropbox.com", "reddit.com", "wikipedia.org", "mozilla.org",
+    }
+
     def _check_hsts(self, target: str) -> dict:
-        try:
-            r = requests.get(f"https://{target}", timeout=5, verify=False, allow_redirects=True)
-            hsts = r.headers.get("Strict-Transport-Security", "")
-            return {
-                "present": bool(hsts),
-                "value": hsts or "ABSENT",
-                "max_age_ok": "max-age=31536000" in hsts or "max-age=63072000" in hsts,
-            }
-        except Exception:
-            return {"present": False, "value": "Erreur de connexion", "max_age_ok": False}
+        """Détection HSTS multi-stratégie :
+        1. HEAD sans redirect (réponse initiale du serveur)
+        2. GET avec suivi de redirects (vérification sur chaque étape)
+        3. Vérification dans la liste statique HSTS Preload
+        """
+        ua = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0"}
+        result = {"present": False, "value": "ABSENT", "preloaded": False, "max_age_ok": False}
+
+        # Stratégie 1 & 2 : HTTP
+        for method, kwargs in [
+            ("HEAD", {"allow_redirects": False}),
+            ("GET",  {"allow_redirects": True}),
+        ]:
+            try:
+                r = requests.request(
+                    method, f"https://{target}",
+                    timeout=5, verify=False, headers=ua, **kwargs
+                )
+                responses = getattr(r, "history", []) + [r]
+                for resp in responses:
+                    hsts = resp.headers.get("Strict-Transport-Security", "")
+                    if hsts:
+                        max_age = 0
+                        try:
+                            max_age = int(
+                                hsts.split("max-age=")[1]
+                                    .split(";")[0].split(",")[0].strip()
+                            )
+                        except Exception:
+                            pass
+                        result.update({
+                            "present":    True,
+                            "value":      hsts,
+                            "max_age_ok": max_age >= 15768000,  # ≥ 6 mois
+                        })
+                        return result
+            except Exception:
+                pass
+
+        # Stratégie 3 : liste statique preload
+        apex = ".".join(target.split(".")[-2:])
+        if target in self.HSTS_PRELOADED or apex in self.HSTS_PRELOADED:
+            result.update({
+                "present":    True,
+                "preloaded":  True,
+                "value":      "Présent via HSTS Preload List (navigateurs)",
+                "max_age_ok": True,
+            })
+
+        return result
 
     def execute(self, config: dict) -> dict:
         timeout = config["modules"]["ssl_auditor"]["timeout"]
@@ -440,10 +524,18 @@ class SslAuditorPlugin(BasePlugin):
 
         # ── Protocoles dépréciés ───────────────────────────────────────────
         self.logger.info("Test des protocoles dépréciés (TLS 1.0, 1.1)…")
+        self._tls_indeterminate = []
         weak_protos = self._check_deprecated(target, port, timeout)
         report["tls"]["deprecated_accepted"] = weak_protos
+        report["tls"]["deprecated_indeterminate"] = self._tls_indeterminate
         for p in weak_protos:
             report["findings"].append(f"ÉLEVÉ — Protocole obsolète accepté : {p}")
+        for p in self._tls_indeterminate:
+            report["findings"].append(
+                f"INFO — {p} : test impossible (OpenSSL 3.x local désactivé) "
+                f"— vérifier manuellement avec : openssl s_client -connect {target}:{port} "
+                f"-{p.lower().replace('.', '_')} -legacy_renegotiation"
+            )
 
         # ── HSTS ──────────────────────────────────────────────────────────
         if port == 443:
@@ -451,8 +543,10 @@ class SslAuditorPlugin(BasePlugin):
             report["hsts"] = self._check_hsts(target)
             if not report["hsts"]["present"]:
                 report["findings"].append("MOYEN — En-tête HSTS absent (Strict-Transport-Security)")
+            elif report["hsts"].get("preloaded"):
+                report["findings"].append("✓ INFO — HSTS via Preload List (pas d'en-tête HTTP direct)")
             elif not report["hsts"]["max_age_ok"]:
-                report["findings"].append("FAIBLE — HSTS présent mais max-age insuffisant (<1 an)")
+                report["findings"].append("FAIBLE — HSTS présent mais max-age insuffisant (< 6 mois)")
 
         # ── Affichage résumé ───────────────────────────────────────────────
         cert_info = report["certificate"]
