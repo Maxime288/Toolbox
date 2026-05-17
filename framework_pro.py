@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️ SECURITY TOOLBOX FRAMEWORK v3.6 (Enterprise Monolithic Core)
-Standards DevSecOps : POO, Concurrence, Fallback API, SSH Hardening, SSL/TLS Auditor & John-like Hash Cracker Simulator.
+⚙️ SECURITY TOOLBOX FRAMEWORK v3.7 (Enterprise Monolithic Core)
+Standards DevSecOps : POO, Concurrence, Fallback API, SSH Hardening, SSL/TLS Auditor & Urus-Mutated Local Hash Cracker.
 """
 
 import os
@@ -41,7 +41,7 @@ except ImportError:
 # =====================================================================
 FRAMEWORK_CONFIG = {
     "framework": {
-        "version": "3.6.0-ENTERPRISE (All-In-One)",
+        "version": "3.7.0-ENTERPRISE (All-In-One)",
         "reports_dir": "reports",
         "log_file": "framework.log"
     },
@@ -52,7 +52,7 @@ FRAMEWORK_CONFIG = {
             "target_ports": [21, 22, 80, 443, 8080]
         },
         "password_audit": {
-            "common_words": ["123456", "password", "admin", "secret", "password123", "qwerty", "kali", "password1234"]
+            "common_words": ["123456", "password", "admin", "secret", "qwerty", "kali", "test"]
         },
         "osint_ip": {
             "timeout": 3,
@@ -319,65 +319,83 @@ class SshHardeningPlugin(BasePlugin):
 
 class LocalJohnCrackerPlugin(BasePlugin):
     """
-    Recyclage et adaptation sécurisée de la logique de brute_forcer.py :
-    Simulateur de cassage de hashs locaux (John the Ripper) avec parallélisation et barre de progression Rich.
+    Simulateur de cassage de hashs locaux (John-like) optimisé.
+    Embarque le moteur de mutation dynamique hérité du script 'urus_cracker.py'.
     """
     @property
-    def name(self) -> str: return "Local Hash Cracker Simulator (John-like)"
+    def name(self) -> str: return "Local Hash Cracker Simulator (John & Urus Engine)"
     @property
-    def description(self) -> str: return "Audit de robustesse de hashs via attaque par dictionnaire multithreadée"
+    def description(self) -> str: return "Audit cryptographique par dictionnaire étendu avec règles de mutation"
 
-    def _crack_worker(self, target_hash, password, algo, found_event):
+    def _get_mutations(self, word: str) -> list:
+        """ Règles de mutation de chaînes importées de urus_cracker.py """
+        return [
+            word,                   # original
+            word.capitalize(),      # Majuscule
+            word + "123",           # Chiffres additionnels
+            word.replace('a', '4').replace('e', '3').replace('i', '1').replace('o', '0') # Transformation Leet Speak
+        ]
+
+    def _crack_worker(self, target_hash: str, password: str, algo: str, found_event) -> str:
         if found_event.is_set():
             return None
         
-        # Dérivation locale selon le type choisi
-        if algo == "MD5":
-            current_hash = hashlib.md5(password.encode()).hexdigest()
-        elif algo == "SHA-256":
-            current_hash = hashlib.sha256(password.encode()).hexdigest()
-        else:
-            current_hash = hashlib.sha1(password.encode()).hexdigest()
-
-        if current_hash == target_hash:
-            found_event.set()
-            return password
+        # Calcul de l'empreinte selon le format sélectionné
+        try:
+            h = hashlib.new(algo.lower())
+            h.update(password.encode('utf-8'))
+            guess_hash = h.hexdigest()
+            
+            if guess_hash == target_hash:
+                found_event.set()
+                return password
+        except Exception:
+            pass
         return None
 
     def execute(self, config: dict) -> dict:
-        wordlist = config["modules"]["password_audit"]["common_words"]
+        base_wordlist = config["modules"]["password_audit"]["common_words"]
         
-        console.print("\n[bold orange1]⚙️ SIMULATEUR DE CASSAGE CRYPTOGRAPHIQUE (LOCAL JOHN)[/bold orange1]")
-        algo = Prompt.ask("Sélectionnez l'algorithme cible", choices=["MD5", "SHA-1", "SHA-256"], default="SHA-256")
-        user_secret = Prompt.ask("Entrez un mot de passe témoin à hacher puis cracker", default="kali")
+        console.print("\n[bold orange1]⚙️ ENGINE COUPLING : JOHN-THE-RIPPER & URUS MUTATION ENGINE[/bold orange1]")
+        algo = Prompt.ask("Sélectionnez l'algorithme cryptographique", choices=["md5", "sha1", "sha256"], default="sha256")
         
-        # Génération du hash cible à casser
-        if algo == "MD5":
-            target_hash = hashlib.md5(user_secret.encode()).hexdigest()
-        elif algo == "SHA-256":
-            target_hash = hashlib.sha256(user_secret.encode()).hexdigest()
-        else:
-            target_hash = hashlib.sha1(user_secret.encode()).hexdigest()
+        # Demande du mot secret témoin (permet de tester si le moteur de mutation fait son travail !)
+        console.print("[gray]Astuce : Entrez 'test' ou un mot muté comme 'Test' ou 't3st' pour évaluer les règles d'Urus.[/gray]")
+        user_secret = Prompt.ask("Définir le mot secret d'évaluation", default="t3st")
+        
+        # Génération du hash cible
+        h_target = hashlib.new(algo.lower())
+        h_target.update(user_secret.encode('utf-8'))
+        target_hash = h_target.hexdigest().strip().lower()
 
-        console.print(f" [bold]*[/bold] Hash généré à inverser : [bold yellow]{target_hash}[/bold yellow]")
-        console.print(f" [bold]*[/bold] Taille du dictionnaire embarqué : [bold cyan]{len(wordlist)} entrées[/bold cyan]\n")
+        # Phase d'expansion de la Wordlist (Génération de la matrice de mutation)
+        self.logger.info("Application de la matrice de mutation d'Urus sur la wordlist de base...")
+        extended_candidates = []
+        for word in base_wordlist:
+            for mutated_word in self._get_mutations(word):
+                clean_word = mutated_word.strip()
+                if clean_word and clean_word not in extended_candidates:
+                    extended_candidates.append(clean_word)
 
-        found_event = concurrent.futures.ThreadPoolExecutor()._shutdown_lock # Simulation d'interrupteur
+        console.print(f" [bold]*[/bold] Empreinte cible générée : [bold yellow]{target_hash}[/bold yellow]")
+        console.print(f" [bold]*[/bold] Dictionnaire étendu via mutations : [bold cyan]{len(extended_candidates)} combinaisons[/bold cyan]\n")
+
         found_event = concurrent.futures.futures.threading.Event()
         valid_password = None
         start_time = time.time()
 
-        # Intégration de la barre de progression Rich (équivalent à ton objet Progress de brute_forcer.py)
+        # Barre de chargement unifiée Rich
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(bar_width=30, complete_style="orange1"),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         ) as progress:
-            task = progress.add_task("[gray]Attacking dictionary...[/gray]", total=len(wordlist))
+            task = progress.add_task("[gray]Calcul des collisions de hashs...[/gray]", total=len(extended_candidates))
             
+            # Traitement asynchrone pour simuler le calcul intensif
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(self._crack_worker, target_hash, pwd, algo, found_event): pwd for pwd in wordlist}
+                futures = {executor.submit(self._crack_worker, target_hash, cand, algo, found_event): cand for cand in extended_candidates}
                 
                 for f in concurrent.futures.as_completed(futures):
                     res = f.result()
@@ -389,16 +407,17 @@ class LocalJohnCrackerPlugin(BasePlugin):
         elapsed = time.time() - start_time
         report = {
             "target_hash": target_hash,
-            "algorithm": algo,
+            "algorithm": algo.upper(),
             "execution_time_sec": round(elapsed, 4),
+            "candidates_tested": len(extended_candidates),
             "crack_success": valid_password is not None,
             "recovered_secret": valid_password if valid_password else "NON_TROUVE"
         }
 
         if valid_password:
-            self.logger.info(f"[bold green][SUCCESS][/bold green] Hash inversé avec succès ! Correspondance : [bold light_green]{valid_password}[/bold light_green]")
+            self.logger.info(f"[bold green][SUCCESS][/bold green] Collision trouvée via la mutation : [bold light_green]{valid_password}[/bold light_green]")
         else:
-            self.logger.warning("[bold red][FAILED][/bold red] Le dictionnaire est trop faible pour inverser ce hash.")
+            self.logger.warning("[bold red][FAILED][/bold red] Secret introuvable. Augmentez la taille de la wordlist de base.")
             
         return report
 
@@ -409,7 +428,6 @@ class LocalJohnCrackerPlugin(BasePlugin):
 class ContextualRiskEngine:
     @staticmethod
     def evaluate(session_vault: dict) -> dict:
-        """ Algorithme de calcul de score basé sur le croisement multi-modules """
         base_score = 1.0
         indicators = []
 
@@ -446,13 +464,12 @@ class ContextualRiskEngine:
                 for vuln in vulnerabilities:
                     indicators.append(f"Défaut de durcissement SSH : {vuln}")
 
-        # 5. Risque Local John Cracker (Nouveau)
-        john_data = session_vault.get("Local Hash Cracker Simulator (John-like)", {}).get("payload", {})
+        # 5. Risque Local John & Urus Engine (Mis à jour)
+        john_data = session_vault.get("Local Hash Cracker Simulator (John & Urus Engine)", {}).get("payload", {})
         if john_data.get("crack_success") is True:
             base_score += 3.0
-            indicators.append(f"Empreinte locale déduite par dictionnaire simple ({john_data.get('algorithm')})")
+            indicators.append(f"Empreinte locale cassée via mutation d'identifiants ({john_data.get('algorithm')})")
 
-        # Normalisation mathématique globale (Plafonné à 10.0)
         final_score = round(min(base_score, 10.0), 1)
         
         if final_score < 4.0: severity = "FAIBLE"
@@ -472,17 +489,14 @@ class ContextualRiskEngine:
 class FrameworkCore:
     def __init__(self):
         self.config = FRAMEWORK_CONFIG
-        
-        # Registre d'Auto-Discovery des plugins du Framework
         self.plugins = [
             NetworkScannerPlugin(),
             PasswordAuditPlugin(),
             OsintIpPlugin(),
             SslAuditorPlugin(),
             SshHardeningPlugin(),
-            LocalJohnCrackerPlugin()
+            LocalJohnCrackerPlugin() # Chargement automatique du plugin étendu
         ]
-        
         self.session_vault = {}
         os.makedirs(self.config["framework"]["reports_dir"], exist_ok=True)
 
@@ -494,7 +508,7 @@ class FrameworkCore:
    ██║   ██║   ██║██║   ██║██║     ██╔══██╗██║   ██║  ██╔██╗     ██║   ██║██╔══██╗██║   ██║
    ██║   ╚██████╔╝╚██████╔╝███████╗██████╔╝╚██████╔╝ ██╔╝ ██╗    ╚██████╔╝██║  ██║╚██████╔╝
    ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚═════╝  ╚═════╝  ╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝ ╚═════╝[/bold blue]
-   [bold magenta]🛡️  Enterprise Security Core Framework v3.6 | SecOps & Hardening Portfolio[/bold magenta]
+   [bold magenta]🛡️  Enterprise Security Core Framework v3.7 | SecOps & Hardening Portfolio[/bold magenta]
         """
         console.print(banner)
 
@@ -542,7 +556,6 @@ class FrameworkCore:
     def run(self):
         logger.info("Initialisation du noyau central réussie.")
         while True:
-            # Nettoyage absolu de l'écran visible + vidage complet du buffer système
             if os.name == 'nt':
                 os.system('cls')
             else:
@@ -552,7 +565,6 @@ class FrameworkCore:
             self.display_banner()
             self.display_soc_dashboard()
 
-            # Rendu dynamique du menu des modules
             menu = Table(show_header=True, header_style="bold purple")
             menu.add_column("ID", width=4)
             menu.add_column("Module Core")
@@ -592,9 +604,6 @@ class FrameworkCore:
             console.input("\n[cyan]Appuyez sur [Entrée] pour rafraîchir le dashboard...[/cyan]")
 
 
-# =====================================================================
-# 7. RUNTIME ENTRY POINT
-# =====================================================================
 if __name__ == "__main__":
     try:
         framework = FrameworkCore()
