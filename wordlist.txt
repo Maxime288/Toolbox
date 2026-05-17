@@ -1,6 +1,7 @@
 123456
 123456789
 picture1
+pwd
 ubuntu
 Ubuntu
 password
