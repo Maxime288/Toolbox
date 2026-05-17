@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-⚙️  ENTERPRISE SECURITY CORE FRAMEWORK v4.1
+⚙️  ENTERPRISE SECURITY CORE FRAMEWORK v4.0 (CORRIGÉ)
 Standards DevSecOps : Architecture Plugin, Concurrence, TLS Audit,
-SSH Real Brute-Force, Port Scanner étendu, Hash Cracker réel (Urus Engine Fix),
+SSH Real Brute-Force, Port Scanner étendu, Hash Cracker réel,
 CVE Lookup, Whois/DNS Recon, Rapport HTML + JSON.
 
 Usage légitime uniquement — sur systèmes avec autorisation écrite.
@@ -53,10 +53,11 @@ try:
 except ImportError:
     PARAMIKO_OK = False
 
+
 # ── Configuration centrale ─────────────────────────────────────────────────────
 FRAMEWORK_CONFIG = {
     "framework": {
-        "version": "4.1.0-STABLE",
+        "version": "4.0.1-STABLE",
         "reports_dir": "reports",
         "log_file": "framework_core.log"
     },
@@ -86,6 +87,7 @@ FRAMEWORK_CONFIG = {
     }
 }
 
+
 # ── Logging unifié ─────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +100,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("FrameworkCore")
 console = Console()
+
 
 # ── Classe de Base Abstraite (Plugin Pattern) ──────────────────────────────────
 class BasePlugin(ABC):
@@ -115,7 +118,8 @@ class BasePlugin(ABC):
     @abstractmethod
     def execute(self, config: dict) -> dict: pass
 
-# ── Implémentation des 8 Plugins ───────────────────────────────────────────────
+
+# ── Implémentation des Plugins ─────────────────────────────────────────────────
 
 class WhoisDnsPlugin(BasePlugin):
     @property
@@ -130,7 +134,6 @@ class WhoisDnsPlugin(BasePlugin):
         results = {"domain": target, "dns_records": {}, "whois_raw": "Non disponible"}
         self.logger.info(f"Lancement de la reconnaissance DNS sur : {target}")
         
-        # Résolution DNS de base via socket
         for rtype in ['A', 'MX', 'TXT']:
             try:
                 if rtype == 'A':
@@ -139,14 +142,13 @@ class WhoisDnsPlugin(BasePlugin):
             except Exception as e:
                 results["dns_records"][rtype] = [f"Erreur ou non trouvé : {str(e)}"]
 
-        # Tentative Whois via commande système
         try:
             cmd = "whois" if os.name != 'nt' else "whois.exe"
             proc = subprocess.run([cmd, target], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
             if proc.returncode == 0:
-                results["whois_raw"] = proc.stdout[:2000] # Limiter la taille
+                results["whois_raw"] = proc.stdout[:2000]
         except Exception:
-            results["whois_raw"] = "Commande 'whois' indisponible localement sur la machine."
+            results["whois_raw"] = "Commande 'whois' indisponible localement."
 
         return results
 
@@ -224,7 +226,6 @@ class SslAuditorPlugin(BasePlugin):
             report["error"] = str(e)
             self.logger.warning(f"Rupture de confiance ou erreur SSL : {e}")
 
-        # Détection rapide de protocoles dépréciés
         deprecated = {"SSLv3": ssl.PROTOCOL_TLSv1 if hasattr(ssl, 'PROTOCOL_TLSv1') else None}
         for name, proto in deprecated.items():
             if proto is None: continue
@@ -267,7 +268,7 @@ class SshBruteForcePlugin(BasePlugin):
         username = Prompt.ask("[bold cyan]Nom d'utilisateur d'authentification[/bold cyan]", default="root").strip()
         wordlist = config["modules"]["password_audit"]["common_words"]
 
-        self.logger.info(f"Lancement du test d'authentification réseau sur {target} (Compte: {username})")
+        self.logger.info(f"Lancement du test sur {target} (Compte: {username})")
         found_password = None
 
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TimeElapsedColumn()) as progress:
@@ -292,8 +293,8 @@ class SshBruteForcePlugin(BasePlugin):
 
 class RealHashCrackerPlugin(BasePlugin):
     """
-    Module 5 : Audit cryptographique local (Urus Engine Corrigé).
-    Inversion de hashs séquentielle stable sans interférences de processus ou de sérialisation.
+    Module 5 CORRIGÉ : Exécution séquentielle rapide intégrée avec Rich.
+    Supprime définitivement les conflits de structures système et de sérilisation parallèles.
     """
     @property
     def name(self) -> str: return "Hash Cracker Réel (Urus Engine)"
@@ -309,7 +310,7 @@ class RealHashCrackerPlugin(BasePlugin):
         ]
 
     def execute(self, config: dict) -> dict:
-        base_wordlist = config.get("modules", {}).get("password_audit", {}).get("common_words", ["kali", "password", "test"])
+        base_wordlist = config.get("modules", {}).get("password_audit", {}).get("common_words", [])
         
         console.print("\n[bold orange1]⚙️ AUDIT CRYPTOGRAPHIQUE LOCAL (URUS MOTOR)[/bold orange1]")
         algo = Prompt.ask("Sélectionnez l'algorithme", choices=["md5", "sha1", "sha256"], default="sha256")
@@ -319,7 +320,6 @@ class RealHashCrackerPlugin(BasePlugin):
             console.print("[bold red][!] Erreur : Aucun hash spécifié.[/bold red]")
             return {"error": "Hash manquant"}
 
-        # Génération de la liste étendue via les règles de mutation d'Urus
         with console.status("[bold cyan]Calcul de la matrice de mutation d'Urus...[/bold cyan]"):
             extended_candidates = []
             for word in base_wordlist:
@@ -335,7 +335,6 @@ class RealHashCrackerPlugin(BasePlugin):
         start_time = time.time()
         count = 0
 
-        # Système de barre de progression synchrone isolée
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -395,15 +394,15 @@ class CveLookupPlugin(BasePlugin):
             if r.status_code == 200:
                 data = r.json()
                 vulnerabilities = []
-                for item in data.get("vulnerabilities", [])[:5]: # Récupérer les 5 plus critiques
+                for item in data.get("vulnerabilities", [])[:5]:
                     cve_id = item.get("cve", {}).get("id")
                     desc = item.get("cve", {}).get("descriptions", [{}])[0].get("value", "Pas de description")
                     vulnerabilities.append({"cve_id": cve_id, "summary": desc[:150] + "..."})
                 return {"keyword": keyword, "vulnerabilities": vulnerabilities}
         except Exception as e:
-            self.logger.warning(f"Échec d'interrogation de l'API de vulnérabilités : {e}")
+            self.logger.warning(f"Échec d'interrogation de l'API : {e}")
             
-        return {"keyword": keyword, "vulnerabilities": [{"cve_id": "Indisponible", "summary": "Erreur d'appel API de télémétrie"}]}
+        return {"keyword": keyword, "vulnerabilities": [{"cve_id": "Indisponible", "summary": "Erreur d'appel API"}]}
 
 
 class OsintIpPlugin(BasePlugin):
@@ -419,7 +418,7 @@ class OsintIpPlugin(BasePlugin):
         for url_template in endpoints:
             url = url_template.format(ip=ip)
             try:
-                self.logger.info(f"Tentative de collecte OSINT via le nœud : {url}")
+                self.logger.info(f"Tentative de collecte OSINT via : {url}")
                 r = requests.get(url, timeout=config["modules"]["osint"]["timeout"])
                 if r.status_code == 200:
                     data = r.json()
@@ -436,44 +435,6 @@ class OsintIpPlugin(BasePlugin):
         return {"error": "Tous les points de terminaison OSINT configurés sont inaccessibles."}
 
 
-class NetworkAuthSimulatorPlugin(BasePlugin):
-    @property
-    def name(self) -> str: return "Network Auth Resilience Simulator (Hydra-style)"
-    @property
-    def description(self) -> str: return "Simulation de résistance aux attaques par force brute réseau et calcul d'impact"
-
-    def execute(self, config: dict) -> dict:
-        wordlist = config["modules"]["password_audit"]["common_words"]
-        
-        console.print("\n[bold orange1]⚙️ SIMULATEUR DE RESILIENCE NETWORK AUTH (HYDRA SIM)[/bold orange1]")
-        target_service = Prompt.ask("Sélectionnez le protocole cible à simuler", choices=["SSH", "FTP", "HTTP-POST"], default="SSH")
-        rate_limit = float(Prompt.ask("Définir la latence de réponse réseau moyenne par tentative (en secondes)", default="0.5"))
-        
-        self.logger.info(f"Modélisation d'une séquence d'authentification sur le service {target_service}...")
-        
-        total_attempts = len(wordlist) * 4
-        theoretical_duration = total_attempts * rate_limit
-        lockout_threshold = 5
-        
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(bar_width=30, complete_style="magenta"), TextColumn("[progress.percentage]{task.percentage:>3.0f}%")) as progress:
-            task = progress.add_task(f"[gray]Modélisation des paquets d'authentification {target_service}...[/gray]", total=total_attempts)
-            for _ in range(min(total_attempts, 100)):
-                time.sleep(0.01)
-                progress.advance(task, advance=total_attempts/100)
-
-        report = {
-            "simulated_service": target_service,
-            "total_credentials_evaluated": total_attempts,
-            "estimated_attack_duration_sec": round(theoretical_duration, 2),
-            "lockout_policy_required": total_attempts > lockout_threshold,
-            "remediation_advise": "Déployer un pare-feu applicatif ou un outil type Fail2ban pour appliquer un bannissement temporaire après 3 échecs."
-        }
-
-        if report["lockout_policy_required"]:
-            self.logger.warning(f"[!] Alerte : Sans filtrage de paquets actif, l'épuisement de la wordlist s'exécuterait en environ {report['estimated_attack_duration_sec']}s.")
-        
-        return report
-
 # ── Moteur d'Évaluation Contextuelle des Risques ────────────────────────────────
 class ContextualRiskEngine:
     @staticmethod
@@ -481,41 +442,32 @@ class ContextualRiskEngine:
         score = 1.0
         factors = []
 
-        # Corrélation Module 2 : Scanner de ports
         ports_payload = session_vault.get("Scanner de Ports Étendu", {}).get("payload", {})
         open_ports = ports_payload.get("open_ports", [])
         if open_ports:
             score += len(open_ports) * 0.8
             factors.append(f"{len(open_ports)} port(s) réseau actif(s) identifié(s).")
 
-        # Corrélation Module 3 : SSL/TLS
         ssl_payload = session_vault.get("Auditeur SSL/TLS", {}).get("payload", {})
-        if ssl_payload.get("obsolete_protocols"):
+        if ssl_payload and ssl_payload.get("obsolete_protocols"):
             score += 2.5
             factors.append("Protocoles de chiffrement obsolètes acceptés par l'hôte distant.")
 
-        # Corrélation Module 4 : Robustesse SSH
         ssh_payload = session_vault.get("Audit de Force Brute SSH", {}).get("payload", {})
-        if ssh_payload.get("vulnerable") is True:
+        if ssh_payload and ssh_payload.get("vulnerable") is True:
             score += 4.5
             factors.append("VULNÉRABILITÉ MAJEURE : Accès réseau SSH compromis par dictionnaire.")
 
-        # Corrélation Module 5 : Hash Cracker
         cracker_payload = session_vault.get("Hash Cracker Réel (Urus Engine)", {}).get("payload", {})
-        if cracker_payload.get("crack_success") is True:
+        if cracker_payload and cracker_payload.get("crack_success") is True:
             score += 3.0
             factors.append(f"Empreinte de mot de passe inversée localement ({cracker_payload.get('algorithm')}).")
-
-        # Corrélation Module 8 : Hydra Simulator
-        hydra_payload = session_vault.get("Network Auth Resilience Simulator (Hydra-style)", {}).get("payload", {})
-        if hydra_payload.get("lockout_policy_required") is True:
-            score += 1.5
-            factors.append(f"Exposition théorique élevée aux attaques par force brute sur service distant : {hydra_payload.get('simulated_service')}")
 
         final_score = round(min(score, 10.0), 1)
         severity = "FAIBLE" if final_score < 4.0 else "ÉLEVÉE" if final_score < 7.5 else "CRITIQUE"
         
         return {"score": final_score, "severity": severity, "factors": factors}
+
 
 # ── Gestionnaire de Rapports Double Format (HTML/JSON) ─────────────────────────
 class ReportGenerator:
@@ -553,7 +505,7 @@ class ReportGenerator:
             <p>Score de Risque de Session : <span class="badge" style="background-color: {severity_color};">{risk["score"]} / 10</span> (Sévérité : <strong>{risk["severity"]}</strong>)</p>
             <h3>Facteurs de Risque Détectés :</h3>
             <ul class="factor-list">
-                {"".join([f"<li>{html.escape(f)}</li>" for f in risk["factors"]]) if risk["factors"] else "<li>Aucun facteur de risque critique détecté dans cette session.</li>"}
+                {"".join([f"<li>{html.escape(f)}</li>" for f in risk["factors"]]) if risk["factors"] else "<li>Aucun défaut d'endurcissement identifié.</li>"}
             </ul>
         </div>
 
@@ -569,6 +521,7 @@ class ReportGenerator:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(html_content)
 
+
 # ── Orchestrateur Central ──────────────────────────────────────────────────────
 class FrameworkCore:
     def __init__(self):
@@ -580,8 +533,7 @@ class FrameworkCore:
             SshBruteForcePlugin(),
             RealHashCrackerPlugin(),
             CveLookupPlugin(),
-            OsintIpPlugin(),
-            NetworkAuthSimulatorPlugin()
+            OsintIpPlugin()
         ]
         self.session_vault = {}
         Path(self.config["framework"]["reports_dir"]).mkdir(exist_ok=True)
@@ -589,7 +541,6 @@ class FrameworkCore:
     def run(self):
         logger.info("Noyau central initialisé avec succès.")
         while True:
-            # Nettoyage console multi-plateforme
             sys.stdout.write("\033[H\033[2J\033[3J" if os.name != 'nt' else "")
             sys.stdout.flush()
             if os.name == 'nt': os.system('cls')
@@ -601,9 +552,8 @@ class FrameworkCore:
    ██║   ██║   ██║██║   ██║██║     ██╔══██╗██║   ██║  ██╔██╗     ██║   ██║██╔══██╗██║   ██║
    ██║   ╚██████╔╝╚██████╔╝███████╗██████╔╝╚██████╔╝ ██╔╝ ██╗    ╚██████╔╝██║  ██║╚██████╔╝
    ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚═════╝  ╚═════╝  ╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝ ╚═════╝[/bold blue]
-[bold magenta]🛡️  Enterprise Security Core Framework v4.1 | DevSecOps & Hardening Module System[/bold magenta]\n""")
+[bold magenta]🛡️  Enterprise Security Core Framework v4.0 | DevSecOps & Hardening Module System[/bold magenta]\n""")
 
-            # Affichage de la télémétrie interne
             telemetry_table = Table(box=box.ROUNDED, border_style="blue")
             telemetry_table.add_column("Indicateur Système", style="yellow")
             telemetry_table.add_column("Statut Actuel", style="green")
@@ -612,7 +562,6 @@ class FrameworkCore:
             telemetry_table.add_row("Registre de Risque Contextuel", "Synchrone & Actif")
             console.print(Panel(telemetry_table, title="📊 DASHBOARD DE CONTROLE SOC"))
 
-            # Menu principal des plugins
             menu = Table(show_header=True, header_style="bold purple", box=box.SIMPLE)
             menu.add_column("ID", width=4, justify="center")
             menu.add_column("Module d'Audit Core")
@@ -620,13 +569,13 @@ class FrameworkCore:
             for idx, plugin in enumerate(self.plugins, 1):
                 menu.add_row(str(idx), plugin.name, plugin.description)
             menu.add_row("R", "[bold gold1]Générer Rapports & Risques Contextuels[/bold gold1]", "Compile l'activité globale de la session")
-            menu.add_row("Q", "Fermeture Core Environment", "Libération propre des descripteurs")
+            menu.add_row("Q", "Fermeture Core Environment", "Libération propre des environnements")
             console.print(menu)
 
             choix = console.input("\n[bold yellow]Sélectionnez une commande ou ID de module : [/bold yellow]").strip().upper()
 
             if choix == "Q":
-                logger.info("Fermeture du framework demandée par l'opérateur.")
+                logger.info("Fermeture du framework demandée.")
                 break
             elif choix == "R":
                 self.export_session_reports()
@@ -656,7 +605,7 @@ class FrameworkCore:
             console.print("[bold yellow][!] Aucun module n'a été exécuté dans cette session. Avortement de l'export.[/bold yellow]")
             return
 
-        with console.status("[bold open_ports]Calcul de la corrélation des risques et écriture des artefacts...[/bold open_ports]"):
+        with console.status("[bold green]Calcul de la corrélation des risques...[/bold green]"):
             risk_profile = ContextualRiskEngine.evaluate(self.session_vault)
             final_report = {
                 "metadata": {
@@ -671,19 +620,17 @@ class FrameworkCore:
             json_path = f"{self.config['framework']['reports_dir']}/audit_report_{timestamp}.json"
             html_path = f"{self.config['framework']['reports_dir']}/audit_report_{timestamp}.html"
 
-            # Export JSON brut
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(final_report, f, indent=4, ensure_ascii=False)
             
-            # Export HTML Stylisé
             ReportGenerator.generate_html(final_report, html_path)
 
         console.print("\n")
         severity_color = "red" if risk_profile["severity"] == "CRITIQUE" else "orange1" if risk_profile["severity"] == "ÉLEVÉE" else "green"
         console.print(Panel(
             f"[bold]Score de Risque de Session :[/bold] [bold {severity_color}]{risk_profile['score']}/10[/bold {severity_color}] ({risk_profile['severity']})\n\n"
-            f"[bold]Indicateurs de compromission / durcissement :[/bold]\n" + 
-            "\n".join([f" • {f}" for f in risk_profile["factors"]]) if risk_profile["factors"] else " • Aucun défaut critique identifié.",
+            f"[bold]Indicateurs identifiés :[/bold]\n" + 
+            "\n".join([f" • {f}" for f in risk_profile["factors"]]) if risk_profile["factors"] else " • Aucun défaut identifié.",
             title="🎯 BILAN DE SÉCURITÉ CONTEXTUEL", border_style=severity_color
         ))
         logger.info(f"Rapport JSON structuré exporté : {json_path}")
@@ -694,7 +641,7 @@ if __name__ == "__main__":
     try:
         FrameworkCore().run()
     except KeyboardInterrupt:
-        console.print("\n[dim]Interruption détectée — Fermeture sécurisée.[/dim]")
+        console.print("\n[dim]Interruption détectée — Fermeture.[/dim]")
     except Exception as fatal_error:
         console.print(f"[bold red][FATAL CORE BREAKDOWN] {fatal_error}[/bold red]")
         sys.exit(1)
